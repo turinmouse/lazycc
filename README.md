@@ -65,8 +65,8 @@ Profiles are stored in `~/.config/capm/config.toml`.
 Tagging a version creates prebuilt release archives and updates the Homebrew tap formula:
 
 ```sh
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 The release workflow expects this repository secret:
