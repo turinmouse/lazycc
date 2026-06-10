@@ -129,7 +129,7 @@ impl Target {
     fn env_vars(self) -> (&'static str, &'static str) {
         match self {
             Target::Codex => ("OPENAI_BASE_URL", "OPENAI_API_KEY"),
-            Target::Claude => ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"),
+            Target::Claude => ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"),
         }
     }
 
@@ -138,7 +138,7 @@ impl Target {
             "OPENAI_BASE_URL",
             "OPENAI_API_KEY",
             "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
         ]
     }
 
@@ -678,10 +678,10 @@ mod tests {
         let script = config.init_script(Shell::Zsh);
 
         assert!(script.contains("unset OPENAI_BASE_URL\n"));
-        assert!(script.contains("unset ANTHROPIC_API_KEY\n"));
+        assert!(script.contains("unset ANTHROPIC_AUTH_TOKEN\n"));
         assert!(script.contains("export OPENAI_BASE_URL='https://api.example.test/v1'\n"));
         assert!(script.contains("export OPENAI_API_KEY='sk-test'\\''quote'\n"));
-        assert!(!script.contains("export ANTHROPIC_API_KEY"));
+        assert!(!script.contains("export ANTHROPIC_AUTH_TOKEN"));
     }
 
     #[test]

@@ -49,7 +49,7 @@ capm del work --target codex
 Supported targets:
 
 - `codex`: sets `OPENAI_BASE_URL` and `OPENAI_API_KEY`
-- `claude`: sets `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`
+- `claude`: sets `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`
 
 Built-in profiles:
 
@@ -65,8 +65,8 @@ Profiles are stored in `~/.config/capm/config.toml`.
 Tagging a version creates prebuilt release archives and updates the Homebrew tap formula:
 
 ```sh
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 The release workflow expects this repository secret:
