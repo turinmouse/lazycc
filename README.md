@@ -32,7 +32,7 @@ Add this line to `~/.zshrc`:
 eval "$(capm init zsh)"
 ```
 
-`capm init zsh` prints shell commands for the currently selected profile. It unsets supported provider variables first, clears any previously registered `codex` shell function, then exports the variables for the active target.
+`capm init zsh` prints shell commands for the currently selected profile. It unsets supported provider variables first, clears any previously registered `capm` and `codex` shell functions, then exports the variables for the active target. It also registers a `capm` shell function so `capm use ...` refreshes the current shell automatically after a successful profile change.
 
 ## Commands
 
@@ -40,8 +40,8 @@ eval "$(capm init zsh)"
 capm add work
 capm add work --target codex
 capm list
-capm switch work
-capm switch work --target claude
+capm use work
+capm use work --target claude
 capm del work
 capm del work --target codex
 ```
@@ -56,7 +56,7 @@ Built-in profiles:
 - `openai` under `codex`
 - `anthropic` under `claude`
 
-These built-in profiles have empty values. Each target has its own current profile, so `openai` and `anthropic` are both selected by default and appear with `*` in `capm list`. Switching to either built-in leaves the related provider variables unset after `capm init zsh` runs. Switching Codex back to `openai` also leaves the real `codex` command unwrapped.
+These built-in profiles have empty values. Each target has its own current profile, so `openai` and `anthropic` are both selected by default and appear with `*` in `capm list`. Using either built-in leaves the related provider variables unset after `capm init zsh` runs. Using Codex profile `openai` also leaves the real `codex` command unwrapped.
 
 Profiles are stored in `~/.config/capm/config.toml`.
 
@@ -65,8 +65,8 @@ Profiles are stored in `~/.config/capm/config.toml`.
 Tagging a version creates prebuilt release archives and updates the Homebrew tap formula:
 
 ```sh
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 The release workflow expects this repository secret:

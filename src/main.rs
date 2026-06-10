@@ -56,9 +56,9 @@ fn run() -> Result<(), CapmError> {
             config.delete(&name, target)?;
             config.save(&path)?;
         }
-        Command::Switch { name, target } => {
+        Command::Use { name, target } => {
             let mut config = Config::load(&path)?;
-            config.switch(&name, target)?;
+            config.use_profile(&name, target)?;
             config.save(&path)?;
         }
     }
@@ -93,7 +93,7 @@ enum Command {
         #[arg(long)]
         target: Option<Target>,
     },
-    Switch {
+    Use {
         name: String,
         #[arg(long)]
         target: Option<Target>,
@@ -256,7 +256,7 @@ impl Config {
         Ok(())
     }
 
-    fn switch(&mut self, name: &str, target: Option<Target>) -> Result<(), CapmError> {
+    fn use_profile(&mut self, name: &str, target: Option<Target>) -> Result<(), CapmError> {
         let resolved = self.resolve(name, target)?;
         self.set_current(resolved);
         Ok(())
@@ -305,6 +305,7 @@ impl Config {
 
     fn zsh_init_script(&self) -> String {
         let mut output = String::new();
+        output.push_str("unfunction capm 2>/dev/null || true\n");
         output.push_str("unfunction codex 2>/dev/null || true\n");
 
         for name in Target::all_env_vars() {
@@ -322,6 +323,8 @@ impl Config {
                 push_codex_wrapper(&mut output, profile);
             }
         }
+
+        push_capm_wrapper(&mut output);
 
         output
     }
@@ -469,6 +472,17 @@ fn push_export_if_present(output: &mut String, name: &str, value: &str) {
     output.push('=');
     output.push_str(&shell_quote(value));
     output.push('\n');
+}
+
+fn push_capm_wrapper(output: &mut String) {
+    output.push_str("capm() {\n");
+    output.push_str("  command capm \"$@\"\n");
+    output.push_str("  local status=$?\n\n");
+    output.push_str("  if [ $status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n");
+    output.push_str("    eval \"$(command capm init zsh)\"\n");
+    output.push_str("  fi\n\n");
+    output.push_str("  return $status\n");
+    output.push_str("}\n");
 }
 
 fn push_codex_wrapper(output: &mut String, profile: &Profile) {
@@ -649,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_requires_target_for_ambiguous_name() {
+    fn use_profile_requires_target_for_ambiguous_name() {
         let mut config = Config {
             current: default_current_profiles(),
             profiles: vec![
@@ -659,14 +673,14 @@ mod tests {
         };
 
         let error = config
-            .switch("work", None)
-            .expect_err("ambiguous switch should fail");
+            .use_profile("work", None)
+            .expect_err("ambiguous profile use should fail");
 
         assert!(matches!(error, CapmError::AmbiguousProfile { name } if name == "work"));
     }
 
     #[test]
-    fn switch_accepts_target_for_ambiguous_name() {
+    fn use_profile_accepts_target_for_ambiguous_name() {
         let mut config = Config {
             current: default_current_profiles(),
             profiles: vec![
@@ -676,7 +690,7 @@ mod tests {
         };
 
         config
-            .switch("work", Some(Target::Claude))
+            .use_profile("work", Some(Target::Claude))
             .expect("target should disambiguate");
 
         assert_eq!(
@@ -686,6 +700,19 @@ mod tests {
                 name: "work".to_string()
             })
         );
+    }
+
+    #[test]
+    fn init_script_wraps_capm_use_to_refresh_current_shell() {
+        let script = Config::default().init_script(Shell::Zsh);
+
+        assert!(script.contains("unfunction capm 2>/dev/null || true\n"));
+        assert!(script.contains("capm() {\n"));
+        assert!(script.contains("  command capm \"$@\"\n"));
+        assert!(script.contains("  local status=$?\n"));
+        assert!(script.contains("  if [ $status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n"));
+        assert!(script.contains("    eval \"$(command capm init zsh)\"\n"));
+        assert!(script.contains("  return $status\n"));
     }
 
     #[test]
@@ -823,10 +850,10 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_default_openai_profile_only_unsets_variables() {
+    fn using_default_openai_profile_only_unsets_variables() {
         let mut config = Config::default();
         config
-            .switch("openai", Some(Target::Codex))
+            .use_profile("openai", Some(Target::Codex))
             .expect("default openai profile should exist");
 
         let script = config.init_script(Shell::Zsh);
