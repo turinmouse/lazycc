@@ -59,3 +59,20 @@ Built-in profiles:
 These built-in profiles have empty values. Each target has its own current profile, so `openai` and `anthropic` are both selected by default and appear with `*` in `capm list`. Switching to either built-in leaves the related provider variables unset after `capm init zsh` runs.
 
 Profiles are stored in `~/.config/capm/config.toml`.
+
+## Release
+
+Tagging a version creates prebuilt release archives and updates the Homebrew tap formula:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow expects this repository secret:
+
+```text
+HOMEBREW_TAP_TOKEN
+```
+
+The token needs permission to push to `turinmouse/homebrew-tap`.
