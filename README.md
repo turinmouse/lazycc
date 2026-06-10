@@ -13,8 +13,16 @@ cargo install --path .
 Homebrew tap installation is intended to use this shape after release:
 
 ```sh
-brew install <tap-owner>/capm/capm
+brew install turinmouse/tap/capm
 ```
+
+Homebrew maps `turinmouse/tap` to this public tap repository:
+
+```text
+https://github.com/turinmouse/homebrew-tap
+```
+
+That tap repository must contain `Formula/capm.rb`.
 
 ## Shell Setup
 
