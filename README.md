@@ -32,7 +32,7 @@ Add this line to `~/.zshrc`:
 eval "$(capm init zsh)"
 ```
 
-`capm init zsh` prints shell commands for the currently selected profile. It unsets supported provider variables first, then exports the variables for the active target.
+`capm init zsh` prints shell commands for the currently selected profile. It unsets supported provider variables first, clears any previously registered `codex` shell function, then exports the variables for the active target.
 
 ## Commands
 
@@ -48,7 +48,7 @@ capm del work --target codex
 
 Supported targets:
 
-- `codex`: sets `OPENAI_BASE_URL` and `OPENAI_API_KEY`
+- `codex`: sets `OPENAI_BASE_URL` and `OPENAI_API_KEY`; non-`openai` profiles also register a `codex` shell function that injects the selected profile as a Codex `model_provider` and forwards all arguments unchanged
 - `claude`: sets `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`
 
 Built-in profiles:
@@ -56,7 +56,7 @@ Built-in profiles:
 - `openai` under `codex`
 - `anthropic` under `claude`
 
-These built-in profiles have empty values. Each target has its own current profile, so `openai` and `anthropic` are both selected by default and appear with `*` in `capm list`. Switching to either built-in leaves the related provider variables unset after `capm init zsh` runs.
+These built-in profiles have empty values. Each target has its own current profile, so `openai` and `anthropic` are both selected by default and appear with `*` in `capm list`. Switching to either built-in leaves the related provider variables unset after `capm init zsh` runs. Switching Codex back to `openai` also leaves the real `codex` command unwrapped.
 
 Profiles are stored in `~/.config/capm/config.toml`.
 

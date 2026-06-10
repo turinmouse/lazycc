@@ -305,6 +305,8 @@ impl Config {
 
     fn zsh_init_script(&self) -> String {
         let mut output = String::new();
+        output.push_str("unfunction codex 2>/dev/null || true\n");
+
         for name in Target::all_env_vars() {
             output.push_str("unset ");
             output.push_str(name);
@@ -315,6 +317,10 @@ impl Config {
             let (base_url_key, api_key_key) = profile.target.env_vars();
             push_export_if_present(&mut output, base_url_key, &profile.base_url);
             push_export_if_present(&mut output, api_key_key, &profile.api_key);
+
+            if profile.target == Target::Codex && profile.name != DEFAULT_CODEX_PROFILE {
+                push_codex_wrapper(&mut output, profile);
+            }
         }
 
         output
@@ -382,6 +388,9 @@ impl Config {
     }
 }
 
+const DEFAULT_CODEX_PROFILE: &str = "openai";
+const DEFAULT_CLAUDE_PROFILE: &str = "anthropic";
+
 fn default_current_profiles() -> Vec<CurrentProfile> {
     Target::all()
         .into_iter()
@@ -391,8 +400,8 @@ fn default_current_profiles() -> Vec<CurrentProfile> {
 
 fn default_current_profile(target: Target) -> CurrentProfile {
     let name = match target {
-        Target::Codex => "openai",
-        Target::Claude => "anthropic",
+        Target::Codex => DEFAULT_CODEX_PROFILE,
+        Target::Claude => DEFAULT_CLAUDE_PROFILE,
     };
 
     CurrentProfile {
@@ -404,13 +413,13 @@ fn default_current_profile(target: Target) -> CurrentProfile {
 fn default_profiles() -> Vec<Profile> {
     vec![
         Profile {
-            name: "openai".to_string(),
+            name: DEFAULT_CODEX_PROFILE.to_string(),
             target: Target::Codex,
             base_url: String::new(),
             api_key: String::new(),
         },
         Profile {
-            name: "anthropic".to_string(),
+            name: DEFAULT_CLAUDE_PROFILE.to_string(),
             target: Target::Claude,
             base_url: String::new(),
             api_key: String::new(),
@@ -460,6 +469,51 @@ fn push_export_if_present(output: &mut String, name: &str, value: &str) {
     output.push('=');
     output.push_str(&shell_quote(value));
     output.push('\n');
+}
+
+fn push_codex_wrapper(output: &mut String, profile: &Profile) {
+    let provider_name = &profile.name;
+
+    output.push_str("codex() {\n");
+    output.push_str("  command codex \\\n");
+    push_codex_config_arg(output, &format!("model_provider={provider_name}"), true);
+    push_codex_config_arg(
+        output,
+        &format!("model_providers.{provider_name}.name={provider_name}"),
+        true,
+    );
+    push_codex_base_url_arg(output, provider_name);
+    push_codex_config_arg(
+        output,
+        &format!("model_providers.{provider_name}.env_key=OPENAI_API_KEY"),
+        true,
+    );
+    push_codex_config_arg(
+        output,
+        &format!("model_providers.{provider_name}.wire_api=responses"),
+        true,
+    );
+    output.push_str("    \"$@\"\n");
+    output.push_str("}\n");
+}
+
+fn push_codex_config_arg(output: &mut String, value: &str, trailing_backslash: bool) {
+    output.push_str("    -c ");
+    output.push_str(&shell_quote(value));
+    if trailing_backslash {
+        output.push_str(" \\\n");
+    } else {
+        output.push('\n');
+    }
+}
+
+fn push_codex_base_url_arg(output: &mut String, provider_key: &str) {
+    output.push_str("    -c ");
+    output.push_str(&shell_quote(&format!(
+        "model_providers.{provider_key}.base_url="
+    )));
+    output.push_str("\"${OPENAI_BASE_URL}\"");
+    output.push_str(" \\\n");
 }
 
 fn mask_api_key(value: &str) -> String {
@@ -665,10 +719,10 @@ mod tests {
         let config = Config {
             current: vec![CurrentProfile {
                 target: Target::Codex,
-                name: "work".to_string(),
+                name: "xcode".to_string(),
             }],
             profiles: vec![Profile {
-                name: "work".to_string(),
+                name: "xcode".to_string(),
                 target: Target::Codex,
                 base_url: "https://api.example.test/v1".to_string(),
                 api_key: "sk-test'quote".to_string(),
@@ -677,11 +731,57 @@ mod tests {
 
         let script = config.init_script(Shell::Zsh);
 
+        assert!(script.contains("unfunction codex 2>/dev/null || true\n"));
         assert!(script.contains("unset OPENAI_BASE_URL\n"));
         assert!(script.contains("unset ANTHROPIC_AUTH_TOKEN\n"));
         assert!(script.contains("export OPENAI_BASE_URL='https://api.example.test/v1'\n"));
         assert!(script.contains("export OPENAI_API_KEY='sk-test'\\''quote'\n"));
         assert!(!script.contains("export ANTHROPIC_AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn init_script_wraps_non_default_codex_profile_and_forwards_arguments() {
+        let config = Config {
+            current: vec![CurrentProfile {
+                target: Target::Codex,
+                name: "xcode".to_string(),
+            }],
+            profiles: vec![Profile {
+                name: "xcode".to_string(),
+                target: Target::Codex,
+                base_url: "https://api.example.test/v1".to_string(),
+                api_key: "sk-test".to_string(),
+            }],
+        };
+
+        let script = config.init_script(Shell::Zsh);
+
+        assert!(script.contains("codex() {\n"));
+        assert!(script.contains("  command codex \\\n"));
+        assert!(script.contains("    -c 'model_provider=xcode' \\\n"));
+        assert!(script.contains("    -c 'model_providers.xcode.name=xcode' \\\n"));
+        assert!(script.contains("model_providers.xcode.base_url="));
+        assert!(script.contains("\"${OPENAI_BASE_URL}\""));
+        assert!(script.contains("    -c 'model_providers.xcode.env_key=OPENAI_API_KEY' \\\n"));
+        assert!(
+            script.contains("    -c 'model_providers.xcode.wire_api=responses' \\\n    \"$@\"\n")
+        );
+    }
+
+    #[test]
+    fn init_script_uses_codex_profile_name_in_provider_config() {
+        let config = Config {
+            current: vec![CurrentProfile {
+                target: Target::Codex,
+                name: "workdev".to_string(),
+            }],
+            profiles: vec![profile("workdev", Target::Codex, "sk-codex")],
+        };
+
+        let script = config.init_script(Shell::Zsh);
+
+        assert!(script.contains("    -c 'model_provider=workdev' \\\n"));
+        assert!(script.contains("    -c 'model_providers.workdev.name=workdev' \\\n"));
     }
 
     #[test]
@@ -733,7 +833,25 @@ mod tests {
 
         assert!(script.contains("unset OPENAI_BASE_URL\n"));
         assert!(script.contains("unset OPENAI_API_KEY\n"));
+        assert!(script.contains("unfunction codex 2>/dev/null || true\n"));
         assert!(!script.contains("export "));
+        assert!(!script.contains("codex()"));
+    }
+
+    #[test]
+    fn claude_profile_does_not_register_codex_wrapper() {
+        let config = Config {
+            current: vec![CurrentProfile {
+                target: Target::Claude,
+                name: "work".to_string(),
+            }],
+            profiles: vec![profile("work", Target::Claude, "sk-claude")],
+        };
+
+        let script = config.init_script(Shell::Zsh);
+
+        assert!(script.contains("export ANTHROPIC_BASE_URL='https://claude.example.test'\n"));
+        assert!(!script.contains("codex()"));
     }
 
     #[test]
