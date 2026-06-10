@@ -1,37 +1,40 @@
-use std::fmt;
-use std::fs;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+mod config;
+mod error;
+mod tui;
 
-use clap::{Parser, Subcommand, ValueEnum};
-use comfy_table::{Cell, Table, presets::UTF8_FULL};
-use inquire::{Password, PasswordDisplayMode, Select, Text};
-use serde::{Deserialize, Serialize};
+use clap::{CommandFactory, Parser, Subcommand};
+use inquire::{Password, PasswordDisplayMode, Text};
+
+use config::{Config, Profile, Shell, Target, config_path};
+use error::LazyccError;
+use tui::run_tui;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("capm: {error}");
+        eprintln!("lazycc: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), CapmError> {
+fn run() -> Result<(), LazyccError> {
     let cli = Cli::parse();
     let path = config_path()?;
 
     match cli.command {
-        Command::Init { shell } => {
+        None => {
+            Cli::command().print_help()?;
+            println!();
+        }
+        Some(Command::Tui) => run_tui(&path)?,
+        Some(Command::Init { shell }) => {
             let config = Config::load(&path)?;
             print!("{}", config.init_script(shell));
         }
-        Command::List => {
+        Some(Command::List) => {
             let config = Config::load(&path)?;
             println!("{}", config.render_table());
         }
-        Command::Add { name, target } => {
+        Some(Command::Add { name, target }) => {
             let target = match target {
                 Some(target) => target,
                 None => Target::prompt()?,
@@ -41,6 +44,7 @@ fn run() -> Result<(), CapmError> {
                 .with_display_mode(PasswordDisplayMode::Masked)
                 .without_confirmation()
                 .prompt()?;
+            let model = Text::new("Model:").prompt()?;
 
             let mut config = Config::load(&path)?;
             config.add(Profile {
@@ -48,15 +52,16 @@ fn run() -> Result<(), CapmError> {
                 target,
                 base_url,
                 api_key,
+                model,
             })?;
             config.save(&path)?;
         }
-        Command::Del { name, target } => {
+        Some(Command::Del { name, target }) => {
             let mut config = Config::load(&path)?;
             config.delete(&name, target)?;
             config.save(&path)?;
         }
-        Command::Use { name, target } => {
+        Some(Command::Use { name, target }) => {
             let mut config = Config::load(&path)?;
             config.use_profile(&name, target)?;
             config.save(&path)?;
@@ -68,20 +73,22 @@ fn run() -> Result<(), CapmError> {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "capm",
+    name = "lazycc",
     version,
     about = "Manage coding-agent API provider profiles"
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    Tui,
     Init {
         shell: Shell,
     },
+    #[command(alias = "ls")]
     List,
     Add {
         name: String,
@@ -100,525 +107,22 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum Shell {
-    Zsh,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-enum Target {
-    Codex,
-    Claude,
-}
-
-impl Target {
-    fn prompt() -> Result<Self, CapmError> {
-        Select::new("Target:", vec![Target::Codex, Target::Claude])
-            .prompt()
-            .map_err(CapmError::from)
-    }
-
-    fn display_name(self) -> &'static str {
-        match self {
-            Target::Codex => "Codex",
-            Target::Claude => "Claude Code",
-        }
-    }
-
-    fn env_vars(self) -> (&'static str, &'static str) {
-        match self {
-            Target::Codex => ("OPENAI_BASE_URL", "OPENAI_API_KEY"),
-            Target::Claude => ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"),
-        }
-    }
-
-    fn all_env_vars() -> &'static [&'static str] {
-        &[
-            "OPENAI_BASE_URL",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_AUTH_TOKEN",
-        ]
-    }
-
-    fn all() -> [Target; 2] {
-        [Target::Codex, Target::Claude]
-    }
-}
-
-impl fmt::Display for Target {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Target::Codex => write!(f, "codex"),
-            Target::Claude => write!(f, "claude"),
-        }
-    }
-}
-
-impl FromStr for Target {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "codex" => Ok(Target::Codex),
-            "claude" => Ok(Target::Claude),
-            _ => Err(format!("unsupported target '{value}'")),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct CurrentProfile {
-    target: Target,
-    name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct Profile {
-    name: String,
-    target: Target,
-    base_url: String,
-    api_key: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct Config {
-    #[serde(default = "default_current_profiles")]
-    current: Vec<CurrentProfile>,
-    #[serde(default)]
-    profiles: Vec<Profile>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            current: default_current_profiles(),
-            profiles: default_profiles(),
-        }
-    }
-}
-
-impl Config {
-    fn load(path: &Path) -> Result<Self, CapmError> {
-        let config = match fs::read_to_string(path) {
-            Ok(content) => toml::from_str(&content).map_err(CapmError::from),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(CapmError::from(error)),
-        }?;
-
-        Ok(config.with_default_profiles())
-    }
-
-    fn save(&self, path: &Path) -> Result<(), CapmError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let content = toml::to_string_pretty(self)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-        set_config_permissions(path)?;
-        Ok(())
-    }
-
-    fn add(&mut self, profile: Profile) -> Result<(), CapmError> {
-        if self
-            .profiles
-            .iter()
-            .any(|existing| existing.name == profile.name && existing.target == profile.target)
-        {
-            return Err(CapmError::DuplicateProfile {
-                target: profile.target,
-                name: profile.name,
-            });
-        }
-
-        self.profiles.push(profile);
-        Ok(())
-    }
-
-    fn delete(&mut self, name: &str, target: Option<Target>) -> Result<(), CapmError> {
-        let resolved = self.resolve(name, target)?;
-        self.profiles
-            .retain(|profile| profile.name != resolved.name || profile.target != resolved.target);
-
-        if self.is_current(&resolved) {
-            self.set_current(default_current_profile(resolved.target));
-        }
-        self.ensure_default_profiles();
-        self.ensure_default_current();
-
-        Ok(())
-    }
-
-    fn use_profile(&mut self, name: &str, target: Option<Target>) -> Result<(), CapmError> {
-        let resolved = self.resolve(name, target)?;
-        self.set_current(resolved);
-        Ok(())
-    }
-
-    fn resolve(&self, name: &str, target: Option<Target>) -> Result<CurrentProfile, CapmError> {
-        let matches: Vec<&Profile> = self
-            .profiles
-            .iter()
-            .filter(|profile| {
-                profile.name == name && target.is_none_or(|target| profile.target == target)
-            })
-            .collect();
-
-        match matches.as_slice() {
-            [] => Err(CapmError::ProfileNotFound {
-                target,
-                name: name.to_string(),
-            }),
-            [profile] => Ok(CurrentProfile {
-                target: profile.target,
-                name: profile.name.clone(),
-            }),
-            _ => Err(CapmError::AmbiguousProfile {
-                name: name.to_string(),
-            }),
-        }
-    }
-
-    fn current_profiles(&self) -> Vec<&Profile> {
-        self.current
-            .iter()
-            .filter_map(|current| {
-                self.profiles.iter().find(|profile| {
-                    profile.name == current.name && profile.target == current.target
-                })
-            })
-            .collect()
-    }
-
-    fn init_script(&self, shell: Shell) -> String {
-        match shell {
-            Shell::Zsh => self.zsh_init_script(),
-        }
-    }
-
-    fn zsh_init_script(&self) -> String {
-        let mut output = String::new();
-        output.push_str("unfunction capm 2>/dev/null || true\n");
-        output.push_str("unfunction codex 2>/dev/null || true\n");
-
-        for name in Target::all_env_vars() {
-            output.push_str("unset ");
-            output.push_str(name);
-            output.push('\n');
-        }
-
-        for profile in self.current_profiles() {
-            let (base_url_key, api_key_key) = profile.target.env_vars();
-            push_export_if_present(&mut output, base_url_key, &profile.base_url);
-            push_export_if_present(&mut output, api_key_key, &profile.api_key);
-
-            if profile.target == Target::Codex && profile.name != DEFAULT_CODEX_PROFILE {
-                push_codex_wrapper(&mut output, profile);
-            }
-        }
-
-        push_capm_wrapper(&mut output);
-
-        output
-    }
-
-    fn render_table(&self) -> String {
-        let mut table = Table::new();
-        table.load_preset(UTF8_FULL);
-        table.set_header(vec!["CURRENT", "NAME", "TARGET", "BASE_URL", "API_KEY"]);
-
-        for profile in &self.profiles {
-            let is_current = self
-                .current
-                .iter()
-                .any(|current| current.name == profile.name && current.target == profile.target);
-            table.add_row(vec![
-                Cell::new(if is_current { "*" } else { "" }),
-                Cell::new(&profile.name),
-                Cell::new(profile.target.display_name()),
-                Cell::new(&profile.base_url),
-                Cell::new(mask_api_key(&profile.api_key)),
-            ]);
-        }
-
-        table.to_string()
-    }
-
-    fn with_default_profiles(mut self) -> Self {
-        self.ensure_default_profiles();
-        self.ensure_default_current();
-        self
-    }
-
-    fn ensure_default_profiles(&mut self) {
-        for default_profile in default_profiles() {
-            if !self.profiles.iter().any(|profile| {
-                profile.name == default_profile.name && profile.target == default_profile.target
-            }) {
-                self.profiles.push(default_profile);
-            }
-        }
-    }
-
-    fn ensure_default_current(&mut self) {
-        for target in Target::all() {
-            if !self.current.iter().any(|current| current.target == target) {
-                self.current.push(default_current_profile(target));
-            }
-        }
-    }
-
-    fn is_current(&self, profile: &CurrentProfile) -> bool {
-        self.current_for_target(profile.target)
-            .is_some_and(|current| current.name == profile.name)
-    }
-
-    fn current_for_target(&self, target: Target) -> Option<&CurrentProfile> {
-        self.current.iter().find(|current| current.target == target)
-    }
-
-    fn set_current(&mut self, profile: CurrentProfile) {
-        self.current
-            .retain(|current| current.target != profile.target);
-        self.current.push(profile);
-    }
-}
-
-const DEFAULT_CODEX_PROFILE: &str = "openai";
-const DEFAULT_CLAUDE_PROFILE: &str = "anthropic";
-
-fn default_current_profiles() -> Vec<CurrentProfile> {
-    Target::all()
-        .into_iter()
-        .map(default_current_profile)
-        .collect()
-}
-
-fn default_current_profile(target: Target) -> CurrentProfile {
-    let name = match target {
-        Target::Codex => DEFAULT_CODEX_PROFILE,
-        Target::Claude => DEFAULT_CLAUDE_PROFILE,
-    };
-
-    CurrentProfile {
-        target,
-        name: name.to_string(),
-    }
-}
-
-fn default_profiles() -> Vec<Profile> {
-    vec![
-        Profile {
-            name: DEFAULT_CODEX_PROFILE.to_string(),
-            target: Target::Codex,
-            base_url: String::new(),
-            api_key: String::new(),
-        },
-        Profile {
-            name: DEFAULT_CLAUDE_PROFILE.to_string(),
-            target: Target::Claude,
-            base_url: String::new(),
-            api_key: String::new(),
-        },
-    ]
-}
-
-fn config_path() -> Result<PathBuf, CapmError> {
-    config_path_from(std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
-}
-
-fn config_path_from(xdg_config_home: Option<PathBuf>) -> Result<PathBuf, CapmError> {
-    xdg_config_home
-        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
-        .map(|path| path.join("capm").join("config.toml"))
-        .ok_or(CapmError::ConfigDirUnavailable)
-}
-
-#[cfg(unix)]
-fn set_config_permissions(path: &Path) -> Result<(), CapmError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_config_permissions(_path: &Path) -> Result<(), CapmError> {
-    Ok(())
-}
-
-fn shell_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn push_export_if_present(output: &mut String, name: &str, value: &str) {
-    if value.is_empty() {
-        return;
-    }
-
-    output.push_str("export ");
-    output.push_str(name);
-    output.push('=');
-    output.push_str(&shell_quote(value));
-    output.push('\n');
-}
-
-fn push_capm_wrapper(output: &mut String) {
-    output.push_str("capm() {\n");
-    output.push_str("  command capm \"$@\"\n");
-    output.push_str("  local status=$?\n\n");
-    output.push_str("  if [ $status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n");
-    output.push_str("    eval \"$(command capm init zsh)\"\n");
-    output.push_str("  fi\n\n");
-    output.push_str("  return $status\n");
-    output.push_str("}\n");
-}
-
-fn push_codex_wrapper(output: &mut String, profile: &Profile) {
-    let provider_name = &profile.name;
-
-    output.push_str("codex() {\n");
-    output.push_str("  command codex \\\n");
-    push_codex_config_arg(output, &format!("model_provider={provider_name}"), true);
-    push_codex_config_arg(
-        output,
-        &format!("model_providers.{provider_name}.name={provider_name}"),
-        true,
-    );
-    push_codex_base_url_arg(output, provider_name);
-    push_codex_config_arg(
-        output,
-        &format!("model_providers.{provider_name}.env_key=OPENAI_API_KEY"),
-        true,
-    );
-    push_codex_config_arg(
-        output,
-        &format!("model_providers.{provider_name}.wire_api=responses"),
-        true,
-    );
-    output.push_str("    \"$@\"\n");
-    output.push_str("}\n");
-}
-
-fn push_codex_config_arg(output: &mut String, value: &str, trailing_backslash: bool) {
-    output.push_str("    -c ");
-    output.push_str(&shell_quote(value));
-    if trailing_backslash {
-        output.push_str(" \\\n");
-    } else {
-        output.push('\n');
-    }
-}
-
-fn push_codex_base_url_arg(output: &mut String, provider_key: &str) {
-    output.push_str("    -c ");
-    output.push_str(&shell_quote(&format!(
-        "model_providers.{provider_key}.base_url="
-    )));
-    output.push_str("\"${OPENAI_BASE_URL}\"");
-    output.push_str(" \\\n");
-}
-
-fn mask_api_key(value: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    match chars.len() {
-        0 => String::new(),
-        1..=8 => "*".repeat(chars.len()),
-        len => {
-            let prefix: String = chars.iter().take(4).collect();
-            let suffix: String = chars.iter().skip(len - 4).collect();
-            format!("{prefix}{}{suffix}", "*".repeat(len - 8))
-        }
-    }
-}
-
-#[derive(Debug)]
-enum CapmError {
-    AmbiguousProfile {
-        name: String,
-    },
-    ConfigDirUnavailable,
-    DuplicateProfile {
-        target: Target,
-        name: String,
-    },
-    Io(io::Error),
-    ProfileNotFound {
-        target: Option<Target>,
-        name: String,
-    },
-    Prompt(inquire::error::InquireError),
-    TomlDeserialize(toml::de::Error),
-    TomlSerialize(toml::ser::Error),
-}
-
-impl fmt::Display for CapmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CapmError::AmbiguousProfile { name } => {
-                write!(
-                    f,
-                    "profile '{name}' exists for multiple targets; pass --target"
-                )
-            }
-            CapmError::ConfigDirUnavailable => {
-                write!(f, "could not determine user config directory")
-            }
-            CapmError::DuplicateProfile { target, name } => {
-                write!(f, "profile '{name}' already exists for target '{target}'")
-            }
-            CapmError::Io(error) => write!(f, "{error}"),
-            CapmError::ProfileNotFound { target, name } => match target {
-                Some(target) => write!(f, "profile '{name}' for target '{target}' was not found"),
-                None => write!(f, "profile '{name}' was not found"),
-            },
-            CapmError::Prompt(error) => write!(f, "{error}"),
-            CapmError::TomlDeserialize(error) => write!(f, "{error}"),
-            CapmError::TomlSerialize(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for CapmError {}
-
-impl From<io::Error> for CapmError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<inquire::error::InquireError> for CapmError {
-    fn from(error: inquire::error::InquireError) -> Self {
-        Self::Prompt(error)
-    }
-}
-
-impl From<toml::de::Error> for CapmError {
-    fn from(error: toml::de::Error) -> Self {
-        Self::TomlDeserialize(error)
-    }
-}
-
-impl From<toml::ser::Error> for CapmError {
-    fn from(error: toml::ser::Error) -> Self {
-        Self::TomlSerialize(error)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::Rect;
+
+    use crate::config::{
+        CurrentProfile, config_path_from, default_current_profile, default_current_profiles,
+        default_profiles, mask_api_key,
+    };
+    use crate::tui::{FocusPane, ProfileForm, TuiAction, TuiApp, TuiMode};
 
     fn profile(name: &str, target: Target, api_key: &str) -> Profile {
         Profile {
@@ -626,6 +130,20 @@ mod tests {
             target,
             base_url: format!("https://{}.example.test", target),
             api_key: api_key.to_string(),
+            model: String::new(),
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn mouse_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
         }
     }
 
@@ -642,7 +160,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            CapmError::DuplicateProfile {
+            LazyccError::DuplicateProfile {
                 target: Target::Codex,
                 name
             } if name == "work"
@@ -676,7 +194,7 @@ mod tests {
             .use_profile("work", None)
             .expect_err("ambiguous profile use should fail");
 
-        assert!(matches!(error, CapmError::AmbiguousProfile { name } if name == "work"));
+        assert!(matches!(error, LazyccError::AmbiguousProfile { name } if name == "work"));
     }
 
     #[test]
@@ -703,16 +221,315 @@ mod tests {
     }
 
     #[test]
-    fn init_script_wraps_capm_use_to_refresh_current_shell() {
+    fn init_script_wraps_lazycc_use_to_refresh_current_shell() {
         let script = Config::default().init_script(Shell::Zsh);
 
-        assert!(script.contains("unfunction capm 2>/dev/null || true\n"));
-        assert!(script.contains("capm() {\n"));
-        assert!(script.contains("  command capm \"$@\"\n"));
-        assert!(script.contains("  local status=$?\n"));
-        assert!(script.contains("  if [ $status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n"));
-        assert!(script.contains("    eval \"$(command capm init zsh)\"\n"));
-        assert!(script.contains("  return $status\n"));
+        assert!(script.contains("unfunction lazycc 2>/dev/null || true\n"));
+        assert!(script.contains("lazycc() {\n"));
+        assert!(script.contains("  command lazycc \"$@\"\n"));
+        assert!(script.contains("  if [ \"$1\" = \"tui\" ]; then\n"));
+        assert!(script.contains("    lazycc_before_init=\"$(command lazycc init zsh)\"\n"));
+        assert!(script.contains("  local lazycc_status=$?\n"));
+        assert!(script.contains("  if [ $lazycc_status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n"));
+        assert!(script.contains("    eval \"$(command lazycc init zsh)\"\n"));
+        assert!(script.contains("  elif [ $lazycc_status -eq 0 ] && [ \"$1\" = \"tui\" ]; then\n"));
+        assert!(script.contains("    local lazycc_after_init=\"$(command lazycc init zsh)\"\n"));
+        assert!(
+            script.contains("    if [ \"$lazycc_before_init\" != \"$lazycc_after_init\" ]; then\n")
+        );
+        assert!(script.contains("      eval \"$lazycc_after_init\"\n"));
+        assert!(script.contains("  return $lazycc_status\n"));
+    }
+
+    #[test]
+    fn cli_accepts_ls_alias_for_list() {
+        let cli = Cli::try_parse_from(["lazycc", "ls"]).expect("ls alias should parse");
+
+        assert!(matches!(cli.command, Some(Command::List)));
+    }
+
+    #[test]
+    fn tui_enter_switches_selected_profile() {
+        let mut config = Config::default();
+        config
+            .add(profile("xcode", Target::Codex, "sk-codex"))
+            .expect("profile should be added");
+        let mut app = TuiApp::new(config);
+        app.focus = FocusPane::Profiles;
+        app.profile_index = app
+            .selected_profile_indices()
+            .iter()
+            .position(|index| app.config.profiles[*index].name == "xcode")
+            .expect("xcode should be selectable");
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::Save);
+
+        assert_eq!(
+            app.config.current_for_target(Target::Codex),
+            Some(&CurrentProfile {
+                target: Target::Codex,
+                name: "xcode".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn tui_space_switches_selected_profile() {
+        let mut config = Config::default();
+        config
+            .add(profile("xcode", Target::Codex, "sk-codex"))
+            .expect("profile should be added");
+        let mut app = TuiApp::new(config);
+        app.focus = FocusPane::Profiles;
+        app.profile_index = app
+            .selected_profile_indices()
+            .iter()
+            .position(|index| app.config.profiles[*index].name == "xcode")
+            .expect("xcode should be selectable");
+
+        assert_eq!(app.handle_key(key(KeyCode::Char(' '))), TuiAction::Save);
+
+        assert_eq!(
+            app.config.current_for_target(Target::Codex),
+            Some(&CurrentProfile {
+                target: Target::Codex,
+                name: "xcode".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn tui_keeps_builtin_profiles_read_only() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Profiles;
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('e'))), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Normal));
+        assert_eq!(app.message, "Built-in profiles are read-only");
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('d'))), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Normal));
+        assert_eq!(app.message, "Built-in profiles cannot be deleted");
+    }
+
+    #[test]
+    fn tui_form_escape_cancels_editing() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('a'))), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Editing(_)));
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Normal));
+    }
+
+    #[test]
+    fn tui_number_keys_switch_panes() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('2'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Details);
+        assert_eq!(app.handle_key(key(KeyCode::Char('1'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('3'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.message, "Panel 3 is reserved");
+    }
+
+    #[test]
+    fn tui_left_right_keys_switch_panes() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Details);
+        assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Details);
+        assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+    }
+
+    #[test]
+    fn tui_adds_profile_from_form() {
+        let mut app = TuiApp::new(Config::default());
+        let mut form = ProfileForm::add(Target::Codex);
+        form.name = "work".to_string();
+        form.base_url = "https://api.example.test/v1".to_string();
+        form.api_key = "sk-test".to_string();
+        form.model = "gpt-5".to_string();
+
+        assert_eq!(app.save_form(&mut form), TuiAction::Save);
+
+        assert!(app.config.profiles.iter().any(|profile| {
+            profile.name == "work"
+                && profile.target == Target::Codex
+                && profile.base_url == "https://api.example.test/v1"
+                && profile.api_key == "sk-test"
+                && profile.model == "gpt-5"
+        }));
+    }
+
+    #[test]
+    fn tui_form_enter_saves_without_advancing_fields() {
+        let mut app = TuiApp::new(Config::default());
+        let mut form = ProfileForm::add(Target::Codex);
+        form.active_field = 0;
+        form.name = "work".to_string();
+        form.base_url = "https://api.example.test/v1".to_string();
+        form.api_key = "sk-test".to_string();
+        form.model = "gpt-5".to_string();
+        app.mode = TuiMode::Editing(form);
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::Save);
+
+        assert!(matches!(app.mode, TuiMode::Normal));
+        assert!(app.config.profiles.iter().any(|profile| {
+            profile.name == "work"
+                && profile.target == Target::Codex
+                && profile.base_url == "https://api.example.test/v1"
+        }));
+    }
+
+    #[test]
+    fn tui_n_opens_add_profile_form() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
+
+        assert!(matches!(app.mode, TuiMode::Editing(_)));
+    }
+
+    #[test]
+    fn tui_toggles_theme() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.theme_kind, tui::TuiThemeKind::Classic);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('t'))), TuiAction::None);
+
+        assert_eq!(app.theme_kind, tui::TuiThemeKind::Warm);
+        assert_eq!(app.message, "Theme: warm");
+    }
+
+    #[test]
+    fn tui_mouse_selects_target_and_profile() {
+        let mut config = Config::default();
+        config
+            .add(profile("xcode", Target::Codex, "sk-codex"))
+            .expect("profile should be added");
+        let mut app = TuiApp::new(config);
+        let area = Rect::new(0, 0, 100, 40);
+
+        assert_eq!(app.handle_mouse(mouse_down(2, 2), area), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.target_index, 1);
+
+        assert_eq!(app.handle_mouse(mouse_down(2, 1), area), TuiAction::None);
+        assert_eq!(app.target_index, 0);
+
+        assert_eq!(app.handle_mouse(mouse_down(2, 9), area), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.profile_index, 1);
+    }
+
+    #[test]
+    fn tui_mouse_selects_form_field() {
+        let mut app = TuiApp::new(Config::default());
+        app.mode = TuiMode::Editing(ProfileForm::add(Target::Codex));
+        let area = Rect::new(0, 0, 100, 40);
+
+        assert_eq!(app.handle_mouse(mouse_down(16, 23), area), TuiAction::None);
+
+        let TuiMode::Editing(form) = app.mode else {
+            panic!("form should remain open");
+        };
+        assert_eq!(form.active_field, 3);
+    }
+
+    #[test]
+    fn tui_edits_custom_profile_and_updates_current_name() {
+        let mut config = Config::default();
+        config
+            .add(profile("old", Target::Codex, "sk-old"))
+            .expect("profile should be added");
+        config
+            .use_profile("old", Some(Target::Codex))
+            .expect("profile should be current");
+        let original = config
+            .profiles
+            .iter()
+            .find(|profile| profile.name == "old" && profile.target == Target::Codex)
+            .expect("profile should exist")
+            .clone();
+        let mut app = TuiApp::new(config);
+        let mut form = ProfileForm::edit(&original);
+        form.name = "new".to_string();
+        form.base_url = "https://new.example.test".to_string();
+
+        assert_eq!(app.save_form(&mut form), TuiAction::Save);
+
+        assert_eq!(
+            app.config.current_for_target(Target::Codex),
+            Some(&CurrentProfile {
+                target: Target::Codex,
+                name: "new".to_string()
+            })
+        );
+        assert!(app.config.profiles.iter().any(|profile| {
+            profile.name == "new"
+                && profile.target == Target::Codex
+                && profile.base_url == "https://new.example.test"
+        }));
+        assert!(
+            !app.config
+                .profiles
+                .iter()
+                .any(|profile| profile.name == "old" && profile.target == Target::Codex)
+        );
+    }
+
+    #[test]
+    fn tui_delete_current_custom_profile_falls_back_to_builtin() {
+        let mut config = Config::default();
+        config
+            .add(profile("xcode", Target::Codex, "sk-codex"))
+            .expect("profile should be added");
+        config
+            .use_profile("xcode", Some(Target::Codex))
+            .expect("profile should be current");
+        let mut app = TuiApp::new(config);
+        app.focus = FocusPane::Profiles;
+        app.profile_index = app
+            .selected_profile_indices()
+            .iter()
+            .position(|index| app.config.profiles[*index].name == "xcode")
+            .expect("xcode should be selectable");
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('d'))), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::ConfirmDelete));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::Save);
+
+        assert_eq!(
+            app.config.current_for_target(Target::Codex),
+            Some(&default_current_profile(Target::Codex))
+        );
+        assert!(
+            !app.config
+                .profiles
+                .iter()
+                .any(|profile| profile.name == "xcode" && profile.target == Target::Codex)
+        );
     }
 
     #[test]
@@ -753,6 +570,7 @@ mod tests {
                 target: Target::Codex,
                 base_url: "https://api.example.test/v1".to_string(),
                 api_key: "sk-test'quote".to_string(),
+                model: String::new(),
             }],
         };
 
@@ -778,6 +596,7 @@ mod tests {
                 target: Target::Codex,
                 base_url: "https://api.example.test/v1".to_string(),
                 api_key: "sk-test".to_string(),
+                model: "gpt-4.1".to_string(),
             }],
         };
 
@@ -786,6 +605,7 @@ mod tests {
         assert!(script.contains("codex() {\n"));
         assert!(script.contains("  command codex \\\n"));
         assert!(script.contains("    -c 'model_provider=xcode' \\\n"));
+        assert!(script.contains("    -c 'model=gpt-4.1' \\\n"));
         assert!(script.contains("    -c 'model_providers.xcode.name=xcode' \\\n"));
         assert!(script.contains("model_providers.xcode.base_url="));
         assert!(script.contains("\"${OPENAI_BASE_URL}\""));
@@ -887,6 +707,49 @@ mod tests {
 
         assert!(table.contains("*"));
         assert!(table.contains("openai"));
+        assert!(table.contains("MODEL"));
+    }
+
+    #[test]
+    fn list_includes_profile_model() {
+        let config = Config {
+            current: default_current_profiles(),
+            profiles: vec![Profile {
+                name: "xcode".to_string(),
+                target: Target::Codex,
+                base_url: "https://api.example.test/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "gpt-4.1".to_string(),
+            }],
+        };
+
+        let table = config.render_table();
+
+        assert!(table.contains("gpt-4.1"));
+    }
+
+    #[test]
+    fn list_sorts_profiles_by_target_then_name() {
+        let config = Config {
+            current: default_current_profiles(),
+            profiles: vec![
+                profile("shuinfo", Target::Claude, "sk-claude"),
+                profile("xcode", Target::Codex, "sk-codex"),
+                profile("anthropic", Target::Claude, ""),
+                profile("openai", Target::Codex, ""),
+            ],
+        };
+
+        let table = config.render_table();
+
+        let openai = table.find("openai").expect("openai should be listed");
+        let xcode = table.find("xcode").expect("xcode should be listed");
+        let anthropic = table.find("anthropic").expect("anthropic should be listed");
+        let shuinfo = table.find("shuinfo").expect("shuinfo should be listed");
+
+        assert!(openai < xcode);
+        assert!(xcode < anthropic);
+        assert!(anthropic < shuinfo);
     }
 
     #[test]
@@ -914,13 +777,29 @@ mod tests {
     }
 
     #[test]
+    fn config_deserializes_profiles_without_model() {
+        let config: Config = toml::from_str(
+            r#"
+                [[profiles]]
+                name = "xcode"
+                target = "codex"
+                base_url = "https://api.example.test/v1"
+                api_key = "sk-test"
+            "#,
+        )
+        .expect("legacy config should deserialize");
+
+        assert_eq!(config.profiles[0].model, "");
+    }
+
+    #[test]
     fn config_path_uses_xdg_config_home_when_present() {
-        let path = config_path_from(Some(PathBuf::from("/tmp/capm-test-config")))
+        let path = config_path_from(Some(PathBuf::from("/tmp/lazycc-test-config")))
             .expect("path should resolve");
 
         assert_eq!(
             path,
-            PathBuf::from("/tmp/capm-test-config/capm/config.toml")
+            PathBuf::from("/tmp/lazycc-test-config/lazycc/config.toml")
         );
     }
 
@@ -934,7 +813,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time should be after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("capm-test-{unique}"));
+        let dir = std::env::temp_dir().join(format!("lazycc-test-{unique}"));
         let path = dir.join("config.toml");
         let config = Config {
             current: Vec::new(),
