@@ -99,7 +99,7 @@ Running `lazycc` without a subcommand prints help. Use `lazycc tui` for the prof
 | Target | Environment |
 | --- | --- |
 | `codex` | `OPENAI_BASE_URL`, `OPENAI_API_KEY` |
-| `claude` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` |
+| `claude` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` |
 
 For Codex, selecting any profile other than the built-in `openai` profile also registers a shell `codex` wrapper. The wrapper injects the selected profile as a Codex `model_provider`, applies the profile `model` when set, and forwards all command arguments unchanged.
 

@@ -46,12 +46,20 @@ impl Target {
         }
     }
 
+    fn model_env_var(self) -> Option<&'static str> {
+        match self {
+            Target::Codex => None,
+            Target::Claude => Some("ANTHROPIC_MODEL"),
+        }
+    }
+
     fn all_env_vars() -> &'static [&'static str] {
         &[
             "OPENAI_BASE_URL",
             "OPENAI_API_KEY",
             "ANTHROPIC_BASE_URL",
             "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_MODEL",
         ]
     }
 
@@ -244,6 +252,9 @@ impl Config {
             let (base_url_key, api_key_key) = profile.target.env_vars();
             push_export_if_present(&mut output, base_url_key, &profile.base_url);
             push_export_if_present(&mut output, api_key_key, &profile.api_key);
+            if let Some(model_key) = profile.target.model_env_var() {
+                push_export_if_present(&mut output, model_key, &profile.model);
+            }
 
             if profile.target == Target::Codex && profile.name != DEFAULT_CODEX_PROFILE {
                 push_codex_wrapper(&mut output, profile);

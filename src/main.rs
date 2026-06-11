@@ -618,9 +618,12 @@ mod tests {
 
         assert!(script.contains("unfunction codex 2>/dev/null || true\n"));
         assert!(script.contains("unset OPENAI_BASE_URL\n"));
+        assert!(!script.contains("unset OPENAI_MODEL\n"));
         assert!(script.contains("unset ANTHROPIC_AUTH_TOKEN\n"));
+        assert!(script.contains("unset ANTHROPIC_MODEL\n"));
         assert!(script.contains("export OPENAI_BASE_URL='https://api.example.test/v1'\n"));
         assert!(script.contains("export OPENAI_API_KEY='sk-test'\\''quote'\n"));
+        assert!(!script.contains("export OPENAI_MODEL="));
         assert!(!script.contains("export ANTHROPIC_AUTH_TOKEN"));
     }
 
@@ -732,12 +735,19 @@ mod tests {
                 target: Target::Claude,
                 name: "work".to_string(),
             }],
-            profiles: vec![profile("work", Target::Claude, "sk-claude")],
+            profiles: vec![Profile {
+                name: "work".to_string(),
+                target: Target::Claude,
+                base_url: "https://claude.example.test".to_string(),
+                api_key: "sk-claude".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+            }],
         };
 
         let script = config.init_script(Shell::Zsh);
 
         assert!(script.contains("export ANTHROPIC_BASE_URL='https://claude.example.test'\n"));
+        assert!(script.contains("export ANTHROPIC_MODEL='claude-sonnet-4-5'\n"));
         assert!(!script.contains("codex()"));
     }
 
