@@ -152,6 +152,7 @@ pub(crate) struct TuiApp {
     pub(crate) plugin_refresh_requests: Vec<Target>,
     pub(crate) plugin_search_index: usize,
     pub(crate) plugin_search_query: String,
+    pub(crate) plugin_search_editing: bool,
     pub(crate) available_plugins: Vec<Plugin>,
     pub(crate) plugin_search_errors: Vec<String>,
     pub(crate) plugin_search_loaded: bool,
@@ -179,6 +180,7 @@ impl TuiApp {
             plugin_refresh_requests: Vec::new(),
             plugin_search_index: 0,
             plugin_search_query: String::new(),
+            plugin_search_editing: false,
             available_plugins: Vec::new(),
             plugin_search_errors: Vec::new(),
             plugin_search_loaded: false,
@@ -327,8 +329,8 @@ impl TuiApp {
     }
 
     pub(crate) fn plugin_search_loading(&self) -> bool {
-        self.plugin_refresh_states
-            .contains(&McpRefreshState::Loading)
+        self.plugin_refresh_states[target_refresh_index(self.selected_target())]
+            == McpRefreshState::Loading
     }
 
     pub(crate) fn theme(&self) -> TuiTheme {
@@ -346,7 +348,6 @@ impl TuiApp {
                     CommandHint::new("Open profiles", "<space>/enter"),
                     CommandHint::new("MCP", "2"),
                     CommandHint::new("Details", "0"),
-                    CommandHint::new("Theme", "t"),
                     CommandHint::new("Quit", "q"),
                 ],
                 FocusPane::Profiles => vec![
@@ -363,7 +364,6 @@ impl TuiApp {
                     CommandHint::new("Tools", "1"),
                     CommandHint::new("Details", "0"),
                     CommandHint::new("Back", "esc"),
-                    CommandHint::new("Theme", "t"),
                     CommandHint::new("Quit", "q"),
                 ],
                 FocusPane::Plugins => vec![
@@ -380,18 +380,16 @@ impl TuiApp {
                     CommandHint::new("MCP", "2"),
                     CommandHint::new("Plugins", "3"),
                     CommandHint::new("Back", "esc"),
-                    CommandHint::new("Theme", "t"),
                     CommandHint::new("Quit", "q"),
                 ],
                 FocusPane::PluginSearch => vec![
                     CommandHint::new("Install/uninstall", "<space>/enter"),
-                    CommandHint::new("Search", "type"),
+                    CommandHint::new("Search", "/"),
                     CommandHint::new("Clear", "backspace"),
                     CommandHint::new("Tools", "1"),
                     CommandHint::new("MCP", "2"),
                     CommandHint::new("Plugins", "3"),
                     CommandHint::new("Back", "esc"),
-                    CommandHint::new("Theme", "t"),
                     CommandHint::new("Quit", "q"),
                 ],
             },
@@ -412,6 +410,10 @@ impl TuiApp {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> TuiAction {
+        if self.focus == FocusPane::PluginSearch && self.plugin_search_editing {
+            return self.handle_plugin_search_edit_key(key);
+        }
+
         match key.code {
             KeyCode::Char('q') => TuiAction::Quit,
             KeyCode::Esc => self.back_or_quit(),
@@ -440,21 +442,20 @@ impl TuiApp {
                 self.select_numbered_pane(value);
                 TuiAction::None
             }
-            KeyCode::Char('t') => {
-                self.toggle_theme();
+            KeyCode::Char('/') if self.focus == FocusPane::PluginSearch => {
+                self.plugin_search_editing = true;
+                self.message = "Search plugins".to_string();
                 TuiAction::None
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_selection(),
             KeyCode::Char('n') | KeyCode::Char('a') => {
-                match self.focus {
-                    FocusPane::Profiles => {
-                        self.mode = TuiMode::Editing(ProfileForm::add(self.selected_target()));
-                    }
-                    FocusPane::Plugins if matches!(key.code, KeyCode::Char('n')) => {
-                        self.set_focus(FocusPane::PluginSearch);
-                        self.message = "Search plugins".to_string();
-                    }
-                    _ => {}
+                if self.focus == FocusPane::Profiles {
+                    self.mode = TuiMode::Editing(ProfileForm::add(self.selected_target()));
+                } else if self.focus == FocusPane::Plugins && matches!(key.code, KeyCode::Char('n'))
+                {
+                    self.set_focus(FocusPane::PluginSearch);
+                    self.plugin_search_editing = false;
+                    self.message = "Plugin market".to_string();
                 }
                 TuiAction::None
             }
@@ -467,13 +468,6 @@ impl TuiApp {
                             .saturating_sub(1),
                     );
                 }
-                TuiAction::None
-            }
-            KeyCode::Char(value)
-                if self.focus == FocusPane::PluginSearch && !value.is_control() =>
-            {
-                self.plugin_search_query.push(value);
-                self.plugin_search_index = 0;
                 TuiAction::None
             }
             KeyCode::Char('e') => {
@@ -498,9 +492,26 @@ impl TuiApp {
         }
     }
 
-    fn toggle_theme(&mut self) {
-        self.theme_kind = self.theme_kind.next();
-        self.message = format!("Theme: {}", self.theme_kind.name());
+    fn handle_plugin_search_edit_key(&mut self, key: KeyEvent) -> TuiAction {
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc => {
+                self.plugin_search_editing = false;
+            }
+            KeyCode::Backspace => {
+                self.plugin_search_query.pop();
+                self.plugin_search_index = self.plugin_search_index.min(
+                    self.filtered_available_plugin_indices()
+                        .len()
+                        .saturating_sub(1),
+                );
+            }
+            KeyCode::Char(value) if !value.is_control() => {
+                self.plugin_search_query.push(value);
+                self.plugin_search_index = 0;
+            }
+            _ => {}
+        }
+        TuiAction::None
     }
 
     fn handle_form_key(&mut self, key: KeyEvent, form: &mut ProfileForm) -> TuiAction {
@@ -601,8 +612,12 @@ impl TuiApp {
                 } else if rect_contains(layout.mcp, mouse.column, mouse.row) {
                     self.handle_mcp_click(layout.mcp, mouse.column, mouse.row);
                 } else if rect_contains(layout.plugins, mouse.column, mouse.row) {
-                    self.handle_plugin_click(layout.plugins, mouse.column, mouse.row);
-                } else if rect_contains(layout.details, mouse.column, mouse.row) {
+                    if self.focus != FocusPane::PluginSearch {
+                        self.handle_plugin_click(layout.plugins, mouse.column, mouse.row);
+                    }
+                } else if rect_contains(layout.details, mouse.column, mouse.row)
+                    && self.focus != FocusPane::PluginSearch
+                {
                     self.set_focus(FocusPane::Details);
                 }
                 TuiAction::None
@@ -716,10 +731,14 @@ impl TuiApp {
             self.set_focus(FocusPane::Mcp);
             true
         } else if rect_contains(layout.plugins, column, row) {
-            self.set_focus(FocusPane::Plugins);
+            if self.focus != FocusPane::PluginSearch {
+                self.set_focus(FocusPane::Plugins);
+            }
             true
         } else if rect_contains(layout.details, column, row) {
-            self.set_focus(FocusPane::Details);
+            if self.focus != FocusPane::PluginSearch {
+                self.set_focus(FocusPane::Details);
+            }
             true
         } else {
             false
@@ -738,7 +757,9 @@ impl TuiApp {
 
     fn handle_plugin_click(&mut self, area: Rect, column: u16, row: u16) {
         let list_area = navigation_list_area(area);
-        if let Some(index) = list_index_in_area(list_area, column, row, self.plugins.len()) {
+        if let Some(index) =
+            list_index_in_area(list_area, column, row, self.selected_plugin_indices().len())
+        {
             self.plugin_index = index;
         }
         self.set_focus(FocusPane::Plugins);
@@ -752,6 +773,7 @@ impl TuiApp {
                 {
                     self.target_index = index;
                     self.profile_index = 0;
+                    self.clamp_target_scoped_indices();
                     self.set_focus(FocusPane::Targets);
                 }
             }
@@ -820,12 +842,16 @@ impl TuiApp {
                 }
             }
             '3' => {
-                self.set_focus(FocusPane::Plugins);
-                self.message = "Focused plugins".to_string();
+                if self.focus != FocusPane::PluginSearch {
+                    self.set_focus(FocusPane::Plugins);
+                    self.message = "Focused plugins".to_string();
+                }
             }
             '0' => {
-                self.set_focus(FocusPane::Details);
-                self.message = "Focused details".to_string();
+                if self.focus != FocusPane::PluginSearch {
+                    self.set_focus(FocusPane::Details);
+                    self.message = "Focused details".to_string();
+                }
             }
             '4'..='5' => {
                 self.message = format!("Panel {value} is reserved");
@@ -839,6 +865,7 @@ impl TuiApp {
             FocusPane::Targets => {
                 self.target_index = move_index(self.target_index, Target::all().len(), delta);
                 self.profile_index = 0;
+                self.clamp_target_scoped_indices();
             }
             FocusPane::Profiles => {
                 self.profile_index = move_index(
@@ -852,7 +879,11 @@ impl TuiApp {
                     move_index(self.mcp_index, self.selected_mcp_indices().len(), delta);
             }
             FocusPane::Plugins => {
-                self.plugin_index = move_index(self.plugin_index, self.plugins.len(), delta);
+                self.plugin_index = move_index(
+                    self.plugin_index,
+                    self.selected_plugin_indices().len(),
+                    delta,
+                );
             }
             FocusPane::Details => {}
             FocusPane::PluginSearch => {
@@ -865,7 +896,7 @@ impl TuiApp {
         }
     }
 
-    fn selected_target(&self) -> Target {
+    pub(crate) fn selected_target(&self) -> Target {
         Target::all()[self.target_index]
     }
 
@@ -912,17 +943,31 @@ impl TuiApp {
             .and_then(|index| self.mcp_servers.get(*index))
     }
 
+    pub(crate) fn selected_plugin_indices(&self) -> Vec<usize> {
+        let target = self.selected_target();
+        self.plugins
+            .iter()
+            .enumerate()
+            .filter_map(|(index, plugin)| (plugin.target == target).then_some(index))
+            .collect()
+    }
+
     pub(crate) fn selected_plugin(&self) -> Option<&Plugin> {
-        self.plugins.get(self.plugin_index)
+        self.selected_plugin_indices()
+            .get(self.plugin_index)
+            .and_then(|index| self.plugins.get(*index))
     }
 
     pub(crate) fn filtered_available_plugin_indices(&self) -> Vec<usize> {
         let query = self.plugin_search_query.trim().to_lowercase();
+        let target = self.selected_target();
         self.available_plugins
             .iter()
             .enumerate()
             .filter_map(|(index, plugin)| {
-                if query.is_empty() || plugin_matches_query(plugin, &query) {
+                if plugin.target == target
+                    && (query.is_empty() || plugin_matches_query(plugin, &query))
+                {
                     Some(index)
                 } else {
                     None
@@ -983,7 +1028,11 @@ impl TuiApp {
                 TuiAction::None
             }
             FocusPane::PluginSearch => {
-                self.set_focus(FocusPane::Plugins);
+                if self.plugin_search_editing {
+                    self.plugin_search_editing = false;
+                } else {
+                    self.set_focus(FocusPane::Plugins);
+                }
                 TuiAction::None
             }
             FocusPane::Targets => TuiAction::Quit,
@@ -1203,7 +1252,6 @@ impl TuiApp {
             Ok(()) => {
                 self.mode = TuiMode::Normal;
                 self.refresh_plugins();
-                self.plugin_index = self.plugin_index.min(self.plugins.len().saturating_sub(1));
                 self.message = format!("Deleted plugin {} for {}", plugin.name, plugin.target);
             }
             Err(error) => {
@@ -1258,6 +1306,7 @@ impl TuiApp {
 
     fn refresh_plugins(&mut self) {
         self.plugins = load_plugins();
+        self.clamp_target_scoped_indices();
     }
 
     fn select_current_target(&mut self) {
@@ -1269,10 +1318,26 @@ impl TuiApp {
                 .is_some_and(|current| current.name != default.name)
             {
                 self.target_index = index;
+                self.clamp_target_scoped_indices();
                 return;
             }
         }
         self.target_index = 0;
+        self.clamp_target_scoped_indices();
+    }
+
+    fn clamp_target_scoped_indices(&mut self) {
+        self.mcp_index = self
+            .mcp_index
+            .min(self.selected_mcp_indices().len().saturating_sub(1));
+        self.plugin_index = self
+            .plugin_index
+            .min(self.selected_plugin_indices().len().saturating_sub(1));
+        self.plugin_search_index = self.plugin_search_index.min(
+            self.filtered_available_plugin_indices()
+                .len()
+                .saturating_sub(1),
+        );
     }
 }
 

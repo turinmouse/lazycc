@@ -146,11 +146,16 @@ fn draw_plugins(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let items: Vec<ListItem> = if app.plugins.is_empty() {
-        vec![ListItem::new("  No plugins")]
+    let indices = app.selected_plugin_indices();
+    let items: Vec<ListItem> = if indices.is_empty() {
+        vec![ListItem::new(format!(
+            "  No plugins for {}",
+            app.selected_target()
+        ))]
     } else {
-        app.plugins
+        indices
             .iter()
+            .filter_map(|index| app.plugins.get(*index))
             .map(|plugin| {
                 let state = if plugin.enabled {
                     "enabled"
@@ -162,7 +167,7 @@ fn draw_plugins(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme
             .collect()
     };
     let mut state = ListState::default();
-    if !app.plugins.is_empty() {
+    if !indices.is_empty() {
         state.select(Some(app.plugin_index.min(items.len() - 1)));
     }
     let list = List::new(items)
@@ -190,10 +195,16 @@ fn draw_plugin_search(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: Tu
     ])
     .split(inner);
 
-    let query = if app.plugin_search_query.is_empty() {
-        "Search: ".to_string()
+    let query = if app.plugin_search_editing {
+        if app.plugin_search_query.is_empty() {
+            "Search: ".to_string()
+        } else {
+            format!("Search: {}", app.plugin_search_query)
+        }
+    } else if app.plugin_search_query.is_empty() {
+        "Press / to search".to_string()
     } else {
-        format!("Search: {}", app.plugin_search_query)
+        format!("Filter: {}  (press / to edit)", app.plugin_search_query)
     };
     frame.render_widget(
         Paragraph::new(query).style(Style::default().fg(theme.label)),
@@ -223,8 +234,8 @@ fn draw_plugin_search(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: Tu
                 };
                 let marketplace = plugin.marketplace.as_deref().unwrap_or("-");
                 ListItem::new(format!(
-                    "  {:<8} {:<28} {:<16} {}",
-                    plugin.target, plugin.name, marketplace, state
+                    "  {:<28} {:<16} {}",
+                    plugin.name, marketplace, state
                 ))
             })
             .collect()
@@ -257,7 +268,9 @@ fn draw_plugin_search(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: Tu
                 Span::raw(&plugin.details),
             ]),
         ],
-        None => vec![Line::from("No plugin selected")],
+        None if app.plugin_search_loading() => vec![Line::from("Loading plugins...")],
+        None if app.plugin_search_errors.is_empty() => vec![Line::from("No plugin selected")],
+        None => Vec::new(),
     };
     if !app.plugin_search_errors.is_empty() {
         details.push(Line::from(vec![

@@ -137,6 +137,18 @@ mod tests {
         }
     }
 
+    fn plugin(target: Target, name: &str) -> Plugin {
+        Plugin {
+            target,
+            name: name.to_string(),
+            selector: format!("{name}@test"),
+            marketplace: Some("test".to_string()),
+            installed: false,
+            enabled: false,
+            details: "test plugin".to_string(),
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -255,7 +267,6 @@ mod tests {
         assert!(keybindings.contains("Open profiles: <space>/enter"));
         assert!(keybindings.contains("MCP: 2"));
         assert!(keybindings.contains("Details: 0"));
-        assert!(keybindings.contains("Theme: t"));
         assert!(keybindings.contains("Quit: q"));
         assert!(keybindings.contains(" | "));
     }
@@ -580,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_plugin_search_only_opens_from_plugins_n_shortcut() {
+    fn tui_plugin_market_opens_from_plugins_n_shortcut() {
         let mut app = TuiApp::new(Config::default());
 
         assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
@@ -595,30 +606,19 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Plugins);
         assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::PluginSearch);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Plugins);
     }
 
     #[test]
     fn tui_plugin_search_filters_and_escape_returns_to_plugins() {
         let mut app = TuiApp::new(Config::default());
         app.available_plugins = vec![
-            Plugin {
-                target: Target::Codex,
-                name: "context-mode".to_string(),
-                selector: "context-mode@main".to_string(),
-                marketplace: Some("main".to_string()),
-                installed: true,
-                enabled: true,
-                details: "1.0.0".to_string(),
-            },
-            Plugin {
-                target: Target::Claude,
-                name: "review".to_string(),
-                selector: "review@team".to_string(),
-                marketplace: Some("team".to_string()),
-                installed: false,
-                enabled: false,
-                details: "0.1.0".to_string(),
-            },
+            plugin(Target::Codex, "context-mode"),
+            plugin(Target::Claude, "review"),
         ];
         app.plugin_search_errors = Vec::new();
         app.plugin_search_loaded = true;
@@ -627,14 +627,107 @@ mod tests {
         app.focus = FocusPane::PluginSearch;
         assert_eq!(app.focus, FocusPane::PluginSearch);
         assert_eq!(app.handle_key(key(KeyCode::Char('r'))), TuiAction::None);
+        assert_eq!(app.plugin_search_query, "");
+        assert_eq!(app.handle_key(key(KeyCode::Char('/'))), TuiAction::None);
+        assert_eq!(app.handle_key(key(KeyCode::Char('r'))), TuiAction::None);
+        assert_eq!(app.plugin_search_query, "r");
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+        assert_eq!(app.plugin_search_query, "rq");
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+        assert_eq!(app.plugin_search_query, "rq0");
+        assert_eq!(app.handle_key(key(KeyCode::Down)), TuiAction::None);
+        assert_eq!(app.plugin_search_index, 0);
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Normal));
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+        assert!(!app.plugin_search_editing);
 
-        let selected = app
-            .selected_available_plugin()
-            .expect("filtered plugin should be selected");
-        assert_eq!(selected.name, "review");
+        assert_eq!(app.selected_available_plugin(), None);
 
         assert_eq!(app.handle_key(key(KeyCode::Esc)), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Plugins);
+    }
+
+    #[test]
+    fn tui_plugins_selection_only_sees_selected_target_plugins() {
+        let mut app = TuiApp::new(Config::default());
+        app.plugins = vec![
+            plugin(Target::Claude, "claude-review"),
+            plugin(Target::Codex, "codex-context"),
+            plugin(Target::Codex, "codex-linear"),
+        ];
+
+        assert_eq!(app.selected_plugin_indices(), vec![1, 2]);
+        assert_eq!(
+            app.selected_plugin().map(|plugin| plugin.name.as_str()),
+            Some("codex-context")
+        );
+
+        app.plugin_index = 1;
+        assert_eq!(
+            app.selected_plugin().map(|plugin| plugin.name.as_str()),
+            Some("codex-linear")
+        );
+
+        app.focus = FocusPane::Plugins;
+        assert_eq!(app.handle_key(key(KeyCode::Down)), TuiAction::None);
+        assert_eq!(app.plugin_index, 1);
+        assert_eq!(
+            app.selected_plugin().map(|plugin| plugin.name.as_str()),
+            Some("codex-linear")
+        );
+    }
+
+    #[test]
+    fn tui_plugin_search_filters_to_selected_target() {
+        let mut app = TuiApp::new(Config::default());
+        app.available_plugins = vec![
+            plugin(Target::Codex, "review"),
+            plugin(Target::Claude, "review"),
+            plugin(Target::Codex, "context-mode"),
+        ];
+        app.plugin_search_query = "review".to_string();
+
+        assert_eq!(app.filtered_available_plugin_indices(), vec![0]);
+        assert_eq!(
+            app.selected_available_plugin()
+                .map(|plugin| (plugin.target, plugin.name.as_str())),
+            Some((Target::Codex, "review"))
+        );
+    }
+
+    #[test]
+    fn tui_switching_target_clamps_plugin_indices() {
+        let mut app = TuiApp::new(Config::default());
+        app.plugins = vec![
+            plugin(Target::Codex, "codex-a"),
+            plugin(Target::Codex, "codex-b"),
+            plugin(Target::Claude, "claude-a"),
+        ];
+        app.available_plugins = vec![
+            plugin(Target::Codex, "codex-a"),
+            plugin(Target::Codex, "codex-b"),
+            plugin(Target::Claude, "claude-a"),
+        ];
+        app.plugin_index = 1;
+        app.plugin_search_index = 1;
+
+        assert_eq!(app.handle_key(key(KeyCode::Down)), TuiAction::None);
+
+        assert_eq!(app.target_index, 1);
+        assert_eq!(app.plugin_index, 0);
+        assert_eq!(app.plugin_search_index, 0);
+        assert_eq!(
+            app.selected_plugin().map(|plugin| plugin.name.as_str()),
+            Some("claude-a")
+        );
+        assert_eq!(
+            app.selected_available_plugin()
+                .map(|plugin| plugin.name.as_str()),
+            Some("claude-a")
+        );
     }
 
     #[test]
@@ -685,18 +778,6 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Details);
         assert!(app.take_plugin_refresh_requests().is_empty());
-    }
-
-    #[test]
-    fn tui_toggles_theme() {
-        let mut app = TuiApp::new(Config::default());
-
-        assert_eq!(app.theme_kind, tui::TuiThemeKind::Classic);
-
-        assert_eq!(app.handle_key(key(KeyCode::Char('t'))), TuiAction::None);
-
-        assert_eq!(app.theme_kind, tui::TuiThemeKind::Warm);
-        assert_eq!(app.message, "Theme: warm");
     }
 
     #[test]

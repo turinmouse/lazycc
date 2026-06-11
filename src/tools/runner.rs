@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,35 +52,65 @@ impl CommandRunner for ProcessCommandRunner {
                 source: error.to_string(),
             })?;
 
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ToolError::CommandFailed {
+                command: command_line.clone(),
+                source: "failed to capture stdout".to_string(),
+            })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ToolError::CommandFailed {
+                command: command_line.clone(),
+                source: "failed to capture stderr".to_string(),
+            })?;
+        let stdout_reader = thread::spawn(move || {
+            let mut reader = stdout;
+            let mut output = Vec::new();
+            let _ = reader.read_to_end(&mut output);
+            String::from_utf8_lossy(&output).to_string()
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut reader = stderr;
+            let mut output = Vec::new();
+            let _ = reader.read_to_end(&mut output);
+            String::from_utf8_lossy(&output).to_string()
+        });
+
         let started_at = Instant::now();
-        loop {
+        let status = loop {
             match child.try_wait().map_err(|error| ToolError::CommandFailed {
                 command: command_line.clone(),
                 source: error.to_string(),
             })? {
-                Some(_) => break,
+                Some(status) => break status,
                 None if started_at.elapsed() >= timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
                     return Err(ToolError::Timeout {
                         command: command_line,
                     });
                 }
                 None => thread::sleep(COMMAND_POLL_INTERVAL),
             }
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|error| ToolError::CommandFailed {
-                command: command_line,
-                source: error.to_string(),
-            })?;
+        };
+        let stdout = stdout_reader.join().map_err(|_| ToolError::CommandFailed {
+            command: command_line.clone(),
+            source: "failed to read stdout".to_string(),
+        })?;
+        let stderr = stderr_reader.join().map_err(|_| ToolError::CommandFailed {
+            command: command_line.clone(),
+            source: "failed to read stderr".to_string(),
+        })?;
 
         Ok(CommandOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            success: status.success(),
+            stdout,
+            stderr,
         })
     }
 }

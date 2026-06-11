@@ -11,6 +11,3 @@ pub(crate) use crate::tools::McpServer;
 
 #[cfg(test)]
 pub(crate) use state::{FocusPane, McpRefreshState, ProfileForm, TuiAction, TuiApp, TuiMode};
-
-#[cfg(test)]
-pub(crate) use theme::TuiThemeKind;
