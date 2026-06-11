@@ -8,6 +8,7 @@ pub(crate) const FORM_FIELD_COUNT: usize = 4;
 pub(crate) struct TuiLayout {
     pub(crate) navigation: Rect,
     pub(crate) mcp: Rect,
+    pub(crate) plugins: Rect,
     pub(crate) details: Rect,
     pub(crate) status: Rect,
 }
@@ -23,19 +24,22 @@ pub(crate) fn tui_layout(area: Rect) -> TuiLayout {
         .split(root[0]);
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(columns[0]);
     TuiLayout {
         navigation: left[0],
         mcp: left[1],
+        plugins: left[2],
         details: columns[1],
         status: root[1],
     }
 }
 
-pub(crate) fn form_fields<'a>(
-    form: &'a ProfileForm,
-) -> [(&'static str, &'a str); FORM_FIELD_COUNT] {
+pub(crate) fn form_fields(form: &ProfileForm) -> [(&'static str, &str); FORM_FIELD_COUNT] {
     [
         ("Name", form.name.as_str()),
         ("Base URL", form.base_url.as_str()),

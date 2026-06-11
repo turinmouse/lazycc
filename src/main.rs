@@ -1,5 +1,7 @@
 mod config;
 mod error;
+mod template;
+mod tools;
 mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -122,6 +124,7 @@ mod tests {
         CurrentProfile, config_path_from, default_current_profile, default_current_profiles,
         default_profiles, mask_api_key,
     };
+    use crate::tools::Plugin;
     use crate::tui::{FocusPane, McpServer, ProfileForm, TuiAction, TuiApp, TuiMode};
 
     fn profile(name: &str, target: Target, api_key: &str) -> Profile {
@@ -227,17 +230,12 @@ mod tests {
         assert!(script.contains("unfunction lazycc 2>/dev/null || true\n"));
         assert!(script.contains("lazycc() {\n"));
         assert!(script.contains("  command lazycc \"$@\"\n"));
-        assert!(script.contains("  if [ \"$1\" = \"tui\" ]; then\n"));
-        assert!(script.contains("    lazycc_before_init=\"$(command lazycc init zsh)\"\n"));
         assert!(script.contains("  local lazycc_status=$?\n"));
         assert!(script.contains("  if [ $lazycc_status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n"));
         assert!(script.contains("    eval \"$(command lazycc init zsh)\"\n"));
         assert!(script.contains("  elif [ $lazycc_status -eq 0 ] && [ \"$1\" = \"tui\" ]; then\n"));
-        assert!(script.contains("    local lazycc_after_init=\"$(command lazycc init zsh)\"\n"));
-        assert!(
-            script.contains("    if [ \"$lazycc_before_init\" != \"$lazycc_after_init\" ]; then\n")
-        );
-        assert!(script.contains("      eval \"$lazycc_after_init\"\n"));
+        assert!(!script.contains("lazycc_before_init"));
+        assert!(!script.contains("lazycc_after_init"));
         assert!(script.contains("  return $lazycc_status\n"));
     }
 
@@ -246,6 +244,90 @@ mod tests {
         let cli = Cli::try_parse_from(["lazycc", "ls"]).expect("ls alias should parse");
 
         assert!(matches!(cli.command, Some(Command::List)));
+    }
+
+    #[test]
+    fn tui_keybindings_generate_targets_hints() {
+        let app = TuiApp::new(Config::default());
+
+        let keybindings = app.keybindings();
+
+        assert!(keybindings.contains("Open profiles: <space>/enter"));
+        assert!(keybindings.contains("MCP: 2"));
+        assert!(keybindings.contains("Details: 0"));
+        assert!(keybindings.contains("Theme: t"));
+        assert!(keybindings.contains("Quit: q"));
+        assert!(keybindings.contains(" | "));
+    }
+
+    #[test]
+    fn tui_new_does_not_request_mcp_refresh() {
+        let app = TuiApp::new(Config::default());
+
+        assert_eq!(
+            app.mcp_refresh_state_for(Target::Codex),
+            tui::McpRefreshState::NotLoaded
+        );
+        assert_eq!(
+            app.mcp_refresh_state_for(Target::Claude),
+            tui::McpRefreshState::NotLoaded
+        );
+        assert!(app.mcp_refresh_requests.is_empty());
+        assert!(app.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn tui_entering_mcp_requests_async_refresh_once() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('2'))), TuiAction::None);
+
+        assert_eq!(app.focus, FocusPane::Mcp);
+        assert_eq!(
+            app.mcp_refresh_state_for(Target::Codex),
+            tui::McpRefreshState::Loading
+        );
+        assert_eq!(app.take_mcp_refresh_requests(), vec![Target::Codex]);
+        assert!(app.take_mcp_refresh_requests().is_empty());
+        assert_eq!(app.message, "Loading MCP servers for codex...");
+    }
+
+    #[test]
+    fn tui_keybindings_generate_profiles_hints() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Profiles;
+
+        let keybindings = app.keybindings();
+
+        assert!(keybindings.contains("Use profile: <space>/enter"));
+        assert!(keybindings.contains("Add: n"));
+        assert!(keybindings.contains("Edit: e"));
+        assert!(keybindings.contains("Delete: d"));
+        assert!(keybindings.contains("Back: esc"));
+        assert!(keybindings.contains("MCP: 2"));
+    }
+
+    #[test]
+    fn tui_keybindings_generate_editing_hints() {
+        let mut app = TuiApp::new(Config::default());
+        app.mode = TuiMode::Editing(ProfileForm::add(Target::Codex));
+
+        let keybindings = app.keybindings();
+
+        assert!(keybindings.contains("Next field: tab/down"));
+        assert!(keybindings.contains("Previous: shift-tab/up"));
+        assert!(keybindings.contains("Save: enter/ctrl-s"));
+        assert!(keybindings.contains("Cancel: esc"));
+    }
+
+    #[test]
+    fn tui_keybindings_generate_delete_confirmation_hints() {
+        let mut app = TuiApp::new(Config::default());
+        app.mode = TuiMode::ConfirmDelete;
+
+        let keybindings = app.keybindings();
+
+        assert_eq!(keybindings, "Confirm: enter/y | Cancel: esc/n");
     }
 
     #[test]
@@ -342,6 +424,7 @@ mod tests {
     #[test]
     fn tui_form_escape_cancels_editing() {
         let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Profiles;
 
         assert_eq!(app.handle_key(key(KeyCode::Char('a'))), TuiAction::None);
         assert!(matches!(app.mode, TuiMode::Editing(_)));
@@ -353,6 +436,7 @@ mod tests {
     #[test]
     fn tui_number_keys_switch_panes() {
         let mut app = TuiApp::new(Config::default());
+        app.plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
 
         assert_eq!(app.handle_key(key(KeyCode::Char('2'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Mcp);
@@ -362,20 +446,34 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Targets);
 
         assert_eq!(app.handle_key(key(KeyCode::Char('3'))), TuiAction::None);
-        assert_eq!(app.focus, FocusPane::Targets);
-        assert_eq!(app.message, "Panel 3 is reserved");
+        assert_eq!(app.focus, FocusPane::Plugins);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('4'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Plugins);
+        assert_eq!(app.message, "Panel 4 is reserved");
     }
 
     #[test]
     fn tui_left_right_keys_switch_panes() {
         let mut app = TuiApp::new(Config::default());
+        app.plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
 
         assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Profiles);
         assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('2'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Mcp);
         assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
-        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.focus, FocusPane::Plugins);
         assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Mcp);
 
@@ -458,10 +556,135 @@ mod tests {
     #[test]
     fn tui_n_opens_add_profile_form() {
         let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Profiles;
 
         assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
 
         assert!(matches!(app.mode, TuiMode::Editing(_)));
+    }
+
+    #[test]
+    fn tui_n_does_not_create_profile_from_mcp_or_plugins() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Mcp;
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Normal));
+        assert_eq!(app.focus, FocusPane::Mcp);
+
+        app.plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
+        app.focus = FocusPane::Plugins;
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Normal));
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+    }
+
+    #[test]
+    fn tui_plugin_search_only_opens_from_plugins_n_shortcut() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Details);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('3'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Plugins);
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Details);
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('3'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Plugins);
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+    }
+
+    #[test]
+    fn tui_plugin_search_filters_and_escape_returns_to_plugins() {
+        let mut app = TuiApp::new(Config::default());
+        app.available_plugins = vec![
+            Plugin {
+                target: Target::Codex,
+                name: "context-mode".to_string(),
+                selector: "context-mode@main".to_string(),
+                marketplace: Some("main".to_string()),
+                installed: true,
+                enabled: true,
+                details: "1.0.0".to_string(),
+            },
+            Plugin {
+                target: Target::Claude,
+                name: "review".to_string(),
+                selector: "review@team".to_string(),
+                marketplace: Some("team".to_string()),
+                installed: false,
+                enabled: false,
+                details: "0.1.0".to_string(),
+            },
+        ];
+        app.plugin_search_errors = Vec::new();
+        app.plugin_search_loaded = true;
+        app.plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
+
+        app.focus = FocusPane::PluginSearch;
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+        assert_eq!(app.handle_key(key(KeyCode::Char('r'))), TuiAction::None);
+
+        let selected = app
+            .selected_available_plugin()
+            .expect("filtered plugin should be selected");
+        assert_eq!(selected.name, "review");
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Plugins);
+    }
+
+    #[test]
+    fn tui_plugin_search_installed_plugin_requires_confirmation() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::PluginSearch;
+        app.available_plugins = vec![Plugin {
+            target: Target::Codex,
+            name: "context-mode".to_string(),
+            selector: "context-mode@main".to_string(),
+            marketplace: Some("main".to_string()),
+            installed: true,
+            enabled: true,
+            details: "1.0.0".to_string(),
+        }];
+        app.plugin_search_errors = Vec::new();
+        app.plugin_search_loaded = true;
+        app.plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
+
+        assert!(matches!(app.mode, TuiMode::ConfirmUninstallPlugin(_)));
+    }
+
+    #[test]
+    fn tui_plugin_search_errors_are_not_selectable_plugins() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::PluginSearch;
+        app.available_plugins = Vec::new();
+        app.plugin_search_errors = vec!["Codex: codex plugin list timed out".to_string()];
+        app.plugin_search_loaded = true;
+        app.plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
+
+        assert_eq!(app.selected_available_plugin(), None);
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
+        assert!(matches!(app.mode, TuiMode::Normal));
+        assert_eq!(app.message, "No plugin selected");
+    }
+
+    #[test]
+    fn tui_plugin_refresh_is_queued_per_target_and_not_by_entering_search() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert!(app.request_plugin_refresh());
+        assert_eq!(app.take_plugin_refresh_requests(), Target::all());
+        assert!(app.take_plugin_refresh_requests().is_empty());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Details);
+        assert!(app.take_plugin_refresh_requests().is_empty());
     }
 
     #[test]
@@ -667,12 +890,60 @@ mod tests {
         assert!(script.contains("    -c 'model_provider=xcode' \\\n"));
         assert!(script.contains("    -c 'model=gpt-4.1' \\\n"));
         assert!(script.contains("    -c 'model_providers.xcode.name=xcode' \\\n"));
-        assert!(script.contains("model_providers.xcode.base_url="));
-        assert!(script.contains("\"${OPENAI_BASE_URL}\""));
+        assert!(
+            script.contains("    -c 'model_providers.xcode.base_url='\"${OPENAI_BASE_URL}\" \\\n")
+        );
         assert!(script.contains("    -c 'model_providers.xcode.env_key=OPENAI_API_KEY' \\\n"));
         assert!(
             script.contains("    -c 'model_providers.xcode.wire_api=responses' \\\n    \"$@\"\n")
         );
+    }
+
+    #[test]
+    fn init_script_does_not_leave_unrendered_template_markers() {
+        let config = Config {
+            current: vec![CurrentProfile {
+                target: Target::Codex,
+                name: "xcode".to_string(),
+            }],
+            profiles: vec![Profile {
+                name: "xcode".to_string(),
+                target: Target::Codex,
+                base_url: "https://api.example.test/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "gpt-4.1".to_string(),
+            }],
+        };
+
+        let script = config.init_script(Shell::Zsh);
+
+        assert!(!script.contains("{{"));
+        assert!(!script.contains("}}"));
+        assert!(!script.contains("{%"));
+        assert!(!script.contains("%}"));
+    }
+
+    #[test]
+    fn init_script_shell_quotes_codex_wrapper_values() {
+        let config = Config {
+            current: vec![CurrentProfile {
+                target: Target::Codex,
+                name: "work'dev".to_string(),
+            }],
+            profiles: vec![Profile {
+                name: "work'dev".to_string(),
+                target: Target::Codex,
+                base_url: "https://api.example.test/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "gpt'4.1".to_string(),
+            }],
+        };
+
+        let script = config.init_script(Shell::Zsh);
+
+        assert!(script.contains("    -c 'model_provider=work'\\''dev' \\\n"));
+        assert!(script.contains("    -c 'model=gpt'\\''4.1' \\\n"));
+        assert!(script.contains("    -c 'model_providers.work'\\''dev.name=work'\\''dev' \\\n"));
     }
 
     #[test]

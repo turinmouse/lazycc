@@ -12,13 +12,15 @@ use inquire::Select;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LazyccError;
+use crate::template::render_template;
+use crate::tools::{all_tools, tool_for, tool_sort_key};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum Shell {
     Zsh,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Target {
     Codex,
@@ -32,46 +34,8 @@ impl Target {
             .map_err(LazyccError::from)
     }
 
-    pub(crate) fn display_name(self) -> &'static str {
-        match self {
-            Target::Codex => "Codex",
-            Target::Claude => "Claude Code",
-        }
-    }
-
-    fn env_vars(self) -> (&'static str, &'static str) {
-        match self {
-            Target::Codex => ("OPENAI_BASE_URL", "OPENAI_API_KEY"),
-            Target::Claude => ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"),
-        }
-    }
-
-    fn model_env_var(self) -> Option<&'static str> {
-        match self {
-            Target::Codex => None,
-            Target::Claude => Some("ANTHROPIC_MODEL"),
-        }
-    }
-
-    fn all_env_vars() -> &'static [&'static str] {
-        &[
-            "OPENAI_BASE_URL",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_MODEL",
-        ]
-    }
-
     pub(crate) fn all() -> [Target; 2] {
         [Target::Codex, Target::Claude]
-    }
-
-    fn sort_key(self) -> u8 {
-        match self {
-            Target::Codex => 0,
-            Target::Claude => 1,
-        }
     }
 }
 
@@ -238,32 +202,44 @@ impl Config {
     }
 
     fn zsh_init_script(&self) -> String {
-        let mut output = String::new();
-        output.push_str("unfunction lazycc 2>/dev/null || true\n");
-        output.push_str("unfunction codex 2>/dev/null || true\n");
+        render_template(SHELL_ZSH_TEMPLATE, self.zsh_init_context())
+    }
 
-        for name in Target::all_env_vars() {
-            output.push_str("unset ");
-            output.push_str(name);
-            output.push('\n');
-        }
+    fn zsh_init_context(&self) -> ShellInitContext {
+        let mut function_names = vec!["lazycc".to_string()];
+        function_names.extend(all_tools().iter().filter_map(|tool| {
+            tool.shell()
+                .and_then(|shell| shell.zsh_function_name())
+                .map(str::to_string)
+        }));
 
+        let unset_envs = all_tools()
+            .iter()
+            .flat_map(|tool| tool.env().all_envs())
+            .map(|name| (*name).to_string())
+            .collect();
+
+        let mut exports = Vec::new();
+        let mut codex_wrapper = None;
         for profile in self.current_profiles() {
-            let (base_url_key, api_key_key) = profile.target.env_vars();
-            push_export_if_present(&mut output, base_url_key, &profile.base_url);
-            push_export_if_present(&mut output, api_key_key, &profile.api_key);
-            if let Some(model_key) = profile.target.model_env_var() {
-                push_export_if_present(&mut output, model_key, &profile.model);
+            let tool = tool_for(profile.target);
+            push_export_if_present(&mut exports, tool.env().base_url_env(), &profile.base_url);
+            push_export_if_present(&mut exports, tool.env().api_key_env(), &profile.api_key);
+            if let Some(model_key) = tool.env().model_env() {
+                push_export_if_present(&mut exports, model_key, &profile.model);
             }
 
             if profile.target == Target::Codex && profile.name != DEFAULT_CODEX_PROFILE {
-                push_codex_wrapper(&mut output, profile);
+                codex_wrapper = Some(CodexWrapperContext::from_profile(profile));
             }
         }
 
-        push_lazycc_wrapper(&mut output);
-
-        output
+        ShellInitContext {
+            function_names,
+            unset_envs,
+            exports,
+            codex_wrapper,
+        }
     }
 
     pub(crate) fn render_table(&self) -> String {
@@ -280,9 +256,8 @@ impl Config {
 
         let mut profiles: Vec<&Profile> = self.profiles.iter().collect();
         profiles.sort_by(|left, right| {
-            left.target
-                .sort_key()
-                .cmp(&right.target.sort_key())
+            tool_sort_key(left.target)
+                .cmp(&tool_sort_key(right.target))
                 .then_with(|| left.name.cmp(&right.name))
         });
 
@@ -294,7 +269,7 @@ impl Config {
             table.add_row(vec![
                 centered_cell(if is_current { "*" } else { "" }),
                 centered_cell(&profile.name),
-                centered_cell(profile.target.display_name()),
+                centered_cell(tool_for(profile.target).display_name()),
                 centered_cell(&profile.model),
                 centered_cell(&profile.base_url),
                 centered_cell(mask_api_key(&profile.api_key)),
@@ -417,94 +392,69 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn push_export_if_present(output: &mut String, name: &str, value: &str) {
+fn push_export_if_present(exports: &mut Vec<ShellExport>, name: &str, value: &str) {
     if value.is_empty() {
         return;
     }
 
-    output.push_str("export ");
-    output.push_str(name);
-    output.push('=');
-    output.push_str(&shell_quote(value));
-    output.push('\n');
+    exports.push(ShellExport {
+        name: name.to_string(),
+        value: shell_quote(value),
+    });
 }
 
 fn centered_cell(value: impl ToString) -> Cell {
     Cell::new(value).set_alignment(CellAlignment::Center)
 }
 
-fn push_lazycc_wrapper(output: &mut String) {
-    output.push_str("lazycc() {\n");
-    output.push_str("  local lazycc_before_init=\"\"\n");
-    output.push_str("  if [ \"$1\" = \"tui\" ]; then\n");
-    output.push_str("    lazycc_before_init=\"$(command lazycc init zsh)\"\n");
-    output.push_str("  fi\n\n");
-    output.push_str("  command lazycc \"$@\"\n");
-    output.push_str("  local lazycc_status=$?\n\n");
-    output.push_str("  if [ $lazycc_status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n");
-    output.push_str("    eval \"$(command lazycc init zsh)\"\n");
-    output.push_str("  elif [ $lazycc_status -eq 0 ] && [ \"$1\" = \"tui\" ]; then\n");
-    output.push_str("    local lazycc_after_init=\"$(command lazycc init zsh)\"\n");
-    output.push_str("    if [ \"$lazycc_before_init\" != \"$lazycc_after_init\" ]; then\n");
-    output.push_str("      eval \"$lazycc_after_init\"\n");
-    output.push_str("    fi\n");
-    output.push_str("  fi\n\n");
-    output.push_str("  return $lazycc_status\n");
-    output.push_str("}\n");
+const SHELL_ZSH_TEMPLATE: &str = include_str!("templates/shell.zsh");
+
+#[derive(Serialize)]
+struct ShellInitContext {
+    function_names: Vec<String>,
+    unset_envs: Vec<String>,
+    exports: Vec<ShellExport>,
+    codex_wrapper: Option<CodexWrapperContext>,
 }
 
-fn push_codex_wrapper(output: &mut String, profile: &Profile) {
-    let provider_name = &profile.name;
-
-    output.push_str("codex() {\n");
-    output.push_str("  command codex \\\n");
-    push_codex_config_arg(output, &format!("model_provider={provider_name}"), true);
-    push_codex_model_arg(output, profile);
-    push_codex_config_arg(
-        output,
-        &format!("model_providers.{provider_name}.name={provider_name}"),
-        true,
-    );
-    push_codex_base_url_arg(output, provider_name);
-    push_codex_config_arg(
-        output,
-        &format!("model_providers.{provider_name}.env_key=OPENAI_API_KEY"),
-        true,
-    );
-    push_codex_config_arg(
-        output,
-        &format!("model_providers.{provider_name}.wire_api=responses"),
-        true,
-    );
-    output.push_str("    \"$@\"\n");
-    output.push_str("}\n");
+#[derive(Serialize)]
+struct ShellExport {
+    name: String,
+    value: String,
 }
 
-fn push_codex_config_arg(output: &mut String, value: &str, trailing_backslash: bool) {
-    output.push_str("    -c ");
-    output.push_str(&shell_quote(value));
-    if trailing_backslash {
-        output.push_str(" \\\n");
-    } else {
-        output.push('\n');
+#[derive(Serialize)]
+struct CodexWrapperContext {
+    config_args: Vec<String>,
+}
+
+impl CodexWrapperContext {
+    fn from_profile(profile: &Profile) -> Self {
+        let mut config_args = vec![shell_quote(&format!("model_provider={}", profile.name))];
+        if !profile.model.is_empty() {
+            config_args.push(shell_quote(&format!("model={}", profile.model)));
+        }
+        config_args.extend([
+            shell_quote(&format!(
+                "model_providers.{}.name={}",
+                profile.name, profile.name
+            )),
+            format!(
+                "{}\"${{OPENAI_BASE_URL}}\"",
+                shell_quote(&format!("model_providers.{}.base_url=", profile.name))
+            ),
+            shell_quote(&format!(
+                "model_providers.{}.env_key=OPENAI_API_KEY",
+                profile.name
+            )),
+            shell_quote(&format!(
+                "model_providers.{}.wire_api=responses",
+                profile.name
+            )),
+        ]);
+
+        Self { config_args }
     }
-}
-
-fn push_codex_model_arg(output: &mut String, profile: &Profile) {
-    if profile.model.is_empty() {
-        return;
-    }
-
-    push_codex_config_arg(output, &format!("model={}", profile.model), true);
-}
-
-fn push_codex_base_url_arg(output: &mut String, provider_key: &str) {
-    output.push_str("    -c ");
-    output.push_str(&shell_quote(&format!(
-        "model_providers.{provider_key}.base_url="
-    )));
-    output.push_str("\"${OPENAI_BASE_URL}\"");
-    output.push_str(" \\\n");
 }
 
 pub(crate) fn mask_api_key(value: &str) -> String {

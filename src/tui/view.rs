@@ -9,9 +9,10 @@ use ratatui::{
 };
 
 use crate::config::{CurrentProfile, Target, mask_api_key};
+use crate::tools::tool_for;
 
 use super::layout::{centered_rect, form_fields, form_layout, tui_layout};
-use super::state::{FocusPane, NavigationTab, ProfileForm, TuiApp, TuiMode, is_builtin_profile};
+use super::state::{FocusPane, McpRefreshState, NavigationTab, ProfileForm, TuiApp, TuiMode};
 use super::theme::TuiTheme;
 
 pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
@@ -20,7 +21,12 @@ pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
 
     draw_navigation(frame, app, layout.navigation, theme);
     draw_mcp_servers(frame, app, layout.mcp, theme);
-    draw_profile_details(frame, app, layout.details, theme);
+    draw_plugins(frame, app, layout.plugins, theme);
+    if app.focus == FocusPane::PluginSearch {
+        draw_plugin_search(frame, app, layout.details, theme);
+    } else {
+        draw_profile_details(frame, app, layout.details, theme);
+    }
     draw_status(frame, app, layout.status, theme);
 
     match &app.mode {
@@ -28,13 +34,17 @@ pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
         TuiMode::Editing(form) => draw_form(frame, form, theme),
         TuiMode::ConfirmDelete => draw_delete_confirmation(frame, app, theme),
         TuiMode::ConfirmDeleteMcp => draw_delete_mcp_confirmation(frame, app, theme),
+        TuiMode::ConfirmDeletePlugin => draw_delete_plugin_confirmation(frame, app, theme),
+        TuiMode::ConfirmUninstallPlugin(plugin) => {
+            draw_uninstall_plugin_confirmation(frame, plugin, theme)
+        }
     }
 }
 
 fn draw_navigation(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
     let block = pane_block(
         navigation_title(app.navigation_tab, theme),
-        app.focus != FocusPane::Details,
+        !matches!(app.focus, FocusPane::PluginSearch | FocusPane::Details),
         theme,
     );
     let inner = block.inner(area);
@@ -101,22 +111,164 @@ fn draw_mcp_servers(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiT
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let items: Vec<ListItem> = app
-        .selected_mcp_indices()
-        .into_iter()
-        .map(|index| {
-            let server = &app.mcp_servers[index];
-            ListItem::new(format!("  {}", server.name))
-        })
-        .collect();
+    let selected_indices = app.selected_mcp_indices();
+    let items: Vec<ListItem> = if selected_indices.is_empty() {
+        let message = match app.selected_mcp_refresh_state() {
+            McpRefreshState::NotLoaded | McpRefreshState::Loading => "  Loading...",
+            McpRefreshState::Loaded => "  No MCP servers",
+        };
+        vec![ListItem::new(message)]
+    } else {
+        selected_indices
+            .into_iter()
+            .map(|index| {
+                let server = &app.mcp_servers[index];
+                ListItem::new(format!("  {}", server.name))
+            })
+            .collect()
+    };
     let mut state = ListState::default();
-    if !items.is_empty() {
+    if !items.is_empty() && !app.selected_mcp_indices().is_empty() {
         state.select(Some(app.mcp_index.min(items.len() - 1)));
     }
     let list = List::new(items)
         .highlight_style(selected_style(theme))
         .highlight_symbol("");
     frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn draw_plugins(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
+    let block = pane_block(
+        Line::styled("[3] Plugins", Style::default().add_modifier(Modifier::BOLD)),
+        app.focus == FocusPane::Plugins,
+        theme,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items: Vec<ListItem> = if app.plugins.is_empty() {
+        vec![ListItem::new("  No plugins")]
+    } else {
+        app.plugins
+            .iter()
+            .map(|plugin| {
+                let state = if plugin.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                ListItem::new(format!("  {:<24} {}", plugin.name, state))
+            })
+            .collect()
+    };
+    let mut state = ListState::default();
+    if !app.plugins.is_empty() {
+        state.select(Some(app.plugin_index.min(items.len() - 1)));
+    }
+    let list = List::new(items)
+        .highlight_style(selected_style(theme))
+        .highlight_symbol("");
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn draw_plugin_search(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
+    let block = pane_block(
+        Line::styled(
+            "[0] Plugin Search",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        app.focus == FocusPane::PluginSearch,
+        theme,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Length(1),
+        ratatui::layout::Constraint::Min(1),
+        ratatui::layout::Constraint::Length(4),
+    ])
+    .split(inner);
+
+    let query = if app.plugin_search_query.is_empty() {
+        "Search: ".to_string()
+    } else {
+        format!("Search: {}", app.plugin_search_query)
+    };
+    frame.render_widget(
+        Paragraph::new(query).style(Style::default().fg(theme.label)),
+        chunks[0],
+    );
+
+    let indices = app.filtered_available_plugin_indices();
+    let items: Vec<ListItem> = if indices.is_empty() {
+        if app.plugin_search_loading() {
+            vec![ListItem::new("  Loading plugins...")]
+        } else {
+            vec![ListItem::new("  No matching plugins")]
+        }
+    } else {
+        indices
+            .iter()
+            .filter_map(|index| app.available_plugins.get(*index))
+            .map(|plugin| {
+                let state = if plugin.installed {
+                    if plugin.enabled {
+                        "installed"
+                    } else {
+                        "disabled"
+                    }
+                } else {
+                    "available"
+                };
+                let marketplace = plugin.marketplace.as_deref().unwrap_or("-");
+                ListItem::new(format!(
+                    "  {:<8} {:<28} {:<16} {}",
+                    plugin.target, plugin.name, marketplace, state
+                ))
+            })
+            .collect()
+    };
+    let mut state = ListState::default();
+    if !indices.is_empty() {
+        state.select(Some(app.plugin_search_index.min(indices.len() - 1)));
+    }
+    let list = List::new(items)
+        .highlight_style(selected_style(theme))
+        .highlight_symbol("");
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+
+    let mut details = match app.selected_available_plugin() {
+        Some(plugin) => vec![
+            Line::from(vec![
+                Span::styled("Selector: ", label_style(theme)),
+                Span::raw(&plugin.selector),
+            ]),
+            Line::from(vec![
+                Span::styled("Action: ", label_style(theme)),
+                Span::raw(if plugin.installed {
+                    "space/enter uninstalls after confirmation"
+                } else {
+                    "space/enter installs"
+                }),
+            ]),
+            Line::from(vec![
+                Span::styled("Details: ", label_style(theme)),
+                Span::raw(&plugin.details),
+            ]),
+        ],
+        None => vec![Line::from("No plugin selected")],
+    };
+    if !app.plugin_search_errors.is_empty() {
+        details.push(Line::from(vec![
+            Span::styled("Errors: ", label_style(theme)),
+            Span::raw(app.plugin_search_errors.join(" | ")),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(details).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
 }
 
 fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
@@ -129,7 +281,7 @@ fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: 
                 ]),
                 Line::from(vec![
                     Span::styled("Target: ", label_style(theme)),
-                    Span::raw(server.target.display_name()),
+                    Span::raw(tool_for(server.target).display_name()),
                 ]),
                 Line::from(vec![
                     Span::styled("Details: ", label_style(theme)),
@@ -137,6 +289,32 @@ fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: 
                 ]),
             ],
             None => vec![Line::from("No MCP server selected")],
+        }
+    } else if app.focus == FocusPane::Plugins {
+        match app.selected_plugin() {
+            Some(plugin) => vec![
+                Line::from(vec![
+                    Span::styled("Name: ", label_style(theme)),
+                    Span::raw(&plugin.name),
+                ]),
+                Line::from(vec![
+                    Span::styled("Target: ", label_style(theme)),
+                    Span::raw(tool_for(plugin.target).display_name()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Status: ", label_style(theme)),
+                    Span::raw(if plugin.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }),
+                ]),
+                Line::from(vec![
+                    Span::styled("Details: ", label_style(theme)),
+                    Span::raw(&plugin.details),
+                ]),
+            ],
+            None => vec![Line::from("No plugin selected")],
         }
     } else {
         match app.selected_profile() {
@@ -152,7 +330,7 @@ fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: 
                     ]),
                     Line::from(vec![
                         Span::styled("Target: ", label_style(theme)),
-                        Span::raw(profile.target.display_name()),
+                        Span::raw(tool_for(profile.target).display_name()),
                     ]),
                     Line::from(vec![
                         Span::styled("Current: ", label_style(theme)),
@@ -169,14 +347,6 @@ fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: 
                     Line::from(vec![
                         Span::styled("API key: ", label_style(theme)),
                         Span::raw(mask_api_key(&profile.api_key)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Mode: ", label_style(theme)),
-                        Span::raw(if is_builtin_profile(profile) {
-                            "read-only built-in"
-                        } else {
-                            "custom"
-                        }),
                     ]),
                 ]
             }
@@ -197,10 +367,11 @@ fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: 
 }
 
 fn draw_status(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
+    let keybindings = app.keybindings();
     let status = Paragraph::new(Line::from(vec![
         Span::styled(app.message.as_str(), Style::default().fg(theme.label)),
         Span::styled("  |  ", Style::default().fg(theme.muted)),
-        Span::styled(app.keybindings(), Style::default().fg(theme.selected_bg)),
+        Span::styled(keybindings, Style::default().fg(theme.selected_bg)),
     ]));
     frame.render_widget(status, area);
 }
@@ -297,6 +468,51 @@ fn draw_delete_mcp_confirmation(frame: &mut Frame<'_>, app: &TuiApp, theme: TuiT
     .block(pane_block(
         Line::styled(
             "Confirm delete MCP",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        true,
+        theme,
+    ));
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_delete_plugin_confirmation(frame: &mut Frame<'_>, app: &TuiApp, theme: TuiTheme) {
+    let area = centered_rect(52, 7, frame.area());
+    frame.render_widget(Clear, area);
+    let name = app
+        .selected_plugin()
+        .map(|plugin| plugin.name.as_str())
+        .unwrap_or("selected plugin");
+    let paragraph = Paragraph::new(vec![
+        Line::from("Delete plugin?"),
+        Line::from(name.to_string()),
+        Line::from("Enter/y confirms, Esc/n cancels"),
+    ])
+    .alignment(Alignment::Center)
+    .block(pane_block(
+        Line::styled("Confirm", Style::default().add_modifier(Modifier::BOLD)),
+        true,
+        theme,
+    ));
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_uninstall_plugin_confirmation(
+    frame: &mut Frame<'_>,
+    plugin: &crate::tools::Plugin,
+    theme: TuiTheme,
+) {
+    let area = centered_rect(52, 7, frame.area());
+    frame.render_widget(Clear, area);
+    let paragraph = Paragraph::new(vec![
+        Line::from("Uninstall plugin?"),
+        Line::from(format!("{} ({})", plugin.name, plugin.target)),
+        Line::from("Enter/y confirms, Esc/n cancels"),
+    ])
+    .alignment(Alignment::Center)
+    .block(pane_block(
+        Line::styled(
+            "Confirm uninstall",
             Style::default().add_modifier(Modifier::BOLD),
         ),
         true,
