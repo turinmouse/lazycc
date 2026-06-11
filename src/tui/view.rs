@@ -52,7 +52,7 @@ fn draw_targets(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme
                 Target::Codex => "codex",
                 Target::Claude => "claude code",
             };
-            ListItem::new(label)
+            ListItem::new(format!("  {label}"))
         })
         .collect();
     let mut state = ListState::default();
