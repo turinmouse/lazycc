@@ -299,6 +299,33 @@ mod tests {
     }
 
     #[test]
+    fn tui_enter_on_target_opens_profiles_tab() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Targets;
+        app.target_index = 1;
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
+
+        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.target_index, 1);
+        assert_eq!(app.message, "Profiles for claude");
+    }
+
+    #[test]
+    fn tui_escape_returns_from_profiles_to_targets() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Targets;
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), TuiAction::None);
+
+        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.message, "Back to targets");
+    }
+
+    #[test]
     fn tui_keeps_builtin_profiles_read_only() {
         let mut app = TuiApp::new(Config::default());
         app.focus = FocusPane::Profiles;
@@ -358,6 +385,16 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Details);
         assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Profiles);
+    }
+
+    #[test]
+    fn tui_tab_keys_do_not_switch_panes() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert_eq!(app.handle_key(key(KeyCode::Tab)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
+        assert_eq!(app.handle_key(key(KeyCode::BackTab)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Targets);
     }
 
     #[test]
@@ -438,7 +475,10 @@ mod tests {
         assert_eq!(app.handle_mouse(mouse_down(2, 1), area), TuiAction::None);
         assert_eq!(app.target_index, 0);
 
-        assert_eq!(app.handle_mouse(mouse_down(2, 9), area), TuiAction::None);
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Profiles);
+
+        assert_eq!(app.handle_mouse(mouse_down(2, 2), area), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Profiles);
         assert_eq!(app.profile_index, 1);
     }

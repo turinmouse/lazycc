@@ -1,23 +1,24 @@
-use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
-use ratatui::{Frame, layout::Alignment};
+use ratatui::{
+    Frame,
+    layout::{Alignment, Rect},
+};
 
 use crate::config::{CurrentProfile, Target, mask_api_key};
 
 use super::layout::{centered_rect, form_fields, form_layout, tui_layout};
-use super::state::{FocusPane, ProfileForm, TuiApp, TuiMode, is_builtin_profile};
+use super::state::{FocusPane, NavigationTab, ProfileForm, TuiApp, TuiMode, is_builtin_profile};
 use super::theme::TuiTheme;
 
 pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
     let theme = app.theme();
     let layout = tui_layout(frame.area());
 
-    draw_targets(frame, app, layout.targets, theme);
-    draw_profiles(frame, app, layout.profiles, theme);
+    draw_navigation(frame, app, layout.navigation, theme);
     draw_profile_details(frame, app, layout.details, theme);
     draw_status(frame, app, layout.status, theme);
 
@@ -25,6 +26,21 @@ pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
         TuiMode::Normal => {}
         TuiMode::Editing(form) => draw_form(frame, form, theme),
         TuiMode::ConfirmDelete => draw_delete_confirmation(frame, app, theme),
+    }
+}
+
+fn draw_navigation(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
+    let block = pane_block(
+        navigation_title(app.navigation_tab, theme),
+        app.focus != FocusPane::Details,
+        theme,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    match app.navigation_tab {
+        NavigationTab::Targets => draw_targets(frame, app, inner, theme),
+        NavigationTab::Profiles => draw_profiles(frame, app, inner, theme),
     }
 }
 
@@ -41,9 +57,7 @@ fn draw_targets(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme
         .collect();
     let mut state = ListState::default();
     state.select(Some(app.target_index));
-    let block = pane_block("[1] Tools", app.focus == FocusPane::Targets, theme);
     let list = List::new(items)
-        .block(block)
         .highlight_style(selected_style(theme))
         .highlight_symbol("");
     frame.render_stateful_widget(list, area, &mut state);
@@ -70,9 +84,7 @@ fn draw_profiles(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiThem
     if !items.is_empty() {
         state.select(Some(app.profile_index.min(items.len() - 1)));
     }
-    let block = pane_block("[2] Profiles", app.focus == FocusPane::Profiles, theme);
     let list = List::new(items)
-        .block(block)
         .highlight_style(selected_style(theme))
         .highlight_symbol("");
     frame.render_stateful_widget(list, area, &mut state);
@@ -124,7 +136,10 @@ fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: 
     };
     let paragraph = Paragraph::new(lines)
         .block(pane_block(
-            "[0] Configuration",
+            Line::styled(
+                "[0] Configuration",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             app.focus == FocusPane::Details,
             theme,
         ))
@@ -146,7 +161,14 @@ fn draw_form(frame: &mut Frame<'_>, form: &ProfileForm, theme: TuiTheme) {
     } else {
         "New provider"
     };
-    frame.render_widget(pane_block(title, true, theme), area);
+    frame.render_widget(
+        pane_block(
+            Line::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+            true,
+            theme,
+        ),
+        area,
+    );
 
     for (index, (label, value)) in fields.iter().enumerate() {
         let shown = if *label == "API key" {
@@ -155,7 +177,11 @@ fn draw_form(frame: &mut Frame<'_>, form: &ProfileForm, theme: TuiTheme) {
             (*value).to_string()
         };
         let input = Paragraph::new(shown)
-            .block(pane_block(label, index == form.active_field, theme))
+            .block(pane_block(
+                Line::styled(*label, Style::default().add_modifier(Modifier::BOLD)),
+                index == form.active_field,
+                theme,
+            ))
             .style(Style::default().fg(theme.text));
         frame.render_widget(input, rows[index + 1]);
     }
@@ -192,24 +218,51 @@ fn draw_delete_confirmation(frame: &mut Frame<'_>, app: &TuiApp, theme: TuiTheme
         Line::from("Enter/y confirms, Esc/n cancels"),
     ])
     .alignment(Alignment::Center)
-    .block(pane_block("Confirm delete", true, theme));
+    .block(pane_block(
+        Line::styled(
+            "Confirm delete",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        true,
+        theme,
+    ));
     frame.render_widget(paragraph, area);
 }
 
-fn pane_block(title: &'static str, focused: bool, theme: TuiTheme) -> Block<'static> {
+fn pane_block(title: Line<'static>, focused: bool, theme: TuiTheme) -> Block<'static> {
     let style = if focused {
         Style::default().fg(theme.focused_border)
     } else {
         Style::default().fg(theme.border)
     };
     Block::default()
-        .title(Line::styled(
-            title,
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
+        .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .style(style)
+}
+
+fn navigation_title(tab: NavigationTab, theme: TuiTheme) -> Line<'static> {
+    let selected = label_style(theme);
+    let muted = Style::default().fg(theme.muted);
+    let targets_style = if tab == NavigationTab::Targets {
+        selected
+    } else {
+        muted
+    };
+    let profiles_style = if tab == NavigationTab::Profiles {
+        selected
+    } else {
+        muted
+    };
+
+    Line::from(vec![
+        Span::styled("[1]", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" - ", muted),
+        Span::styled("Targets", targets_style),
+        Span::styled(" - ", muted),
+        Span::styled("Profiles", profiles_style),
+    ])
 }
 
 fn selected_style(theme: TuiTheme) -> Style {

@@ -6,8 +6,7 @@ pub(crate) const FORM_FIELD_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TuiLayout {
-    pub(crate) targets: Rect,
-    pub(crate) profiles: Rect,
+    pub(crate) navigation: Rect,
     pub(crate) details: Rect,
     pub(crate) status: Rect,
 }
@@ -21,14 +20,8 @@ pub(crate) fn tui_layout(area: Rect) -> TuiLayout {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
         .split(root[0]);
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)])
-        .split(columns[0]);
-
     TuiLayout {
-        targets: left[0],
-        profiles: left[1],
+        navigation: columns[0],
         details: columns[1],
         status: root[1],
     }
@@ -95,19 +88,23 @@ pub(crate) fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height)
 }
 
-pub(crate) fn list_index_at(area: Rect, column: u16, row: u16, item_count: usize) -> Option<usize> {
+pub(crate) fn navigation_list_area(area: Rect) -> Rect {
+    area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    })
+}
+
+pub(crate) fn list_index_in_area(
+    area: Rect,
+    column: u16,
+    row: u16,
+    item_count: usize,
+) -> Option<usize> {
     if !rect_contains(area, column, row) || item_count == 0 {
         return None;
     }
 
-    let inner = area.inner(Margin {
-        vertical: 1,
-        horizontal: 1,
-    });
-    if !rect_contains(inner, column, row) {
-        return None;
-    }
-
-    let index = row.saturating_sub(inner.y) as usize;
+    let index = row.saturating_sub(area.y) as usize;
     (index < item_count).then_some(index)
 }

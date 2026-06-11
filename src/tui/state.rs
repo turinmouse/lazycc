@@ -7,8 +7,8 @@ use crate::config::{
 };
 
 use super::layout::{
-    FORM_FIELD_COUNT, TuiLayout, centered_rect, form_layout, list_index_at, rect_contains,
-    tui_layout,
+    FORM_FIELD_COUNT, TuiLayout, centered_rect, form_layout, list_index_in_area,
+    navigation_list_area, rect_contains, tui_layout,
 };
 use super::theme::{TuiTheme, TuiThemeKind};
 
@@ -17,6 +17,12 @@ pub(crate) enum FocusPane {
     Targets,
     Profiles,
     Details,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NavigationTab {
+    Targets,
+    Profiles,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +115,7 @@ pub(crate) struct TuiApp {
     pub(crate) target_index: usize,
     pub(crate) profile_index: usize,
     pub(crate) focus: FocusPane,
+    pub(crate) navigation_tab: NavigationTab,
     pub(crate) mode: TuiMode,
     pub(crate) theme_kind: TuiThemeKind,
     pub(crate) message: String,
@@ -122,10 +129,10 @@ impl TuiApp {
             target_index: 0,
             profile_index: 0,
             focus: FocusPane::Targets,
+            navigation_tab: NavigationTab::Targets,
             mode: TuiMode::Normal,
             theme_kind: TuiThemeKind::Classic,
-            message: "1 tools, 2 profiles, 0 details, n adds, t theme, Enter switches, q quits"
-                .to_string(),
+            message: "Enter opens profiles, Esc backs out, n adds, t theme, q quits".to_string(),
             should_quit: false,
         };
         app.select_current_target();
@@ -154,15 +161,9 @@ impl TuiApp {
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> TuiAction {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => TuiAction::Quit,
-            KeyCode::Tab => {
-                self.focus_next_left_pane();
-                TuiAction::None
-            }
-            KeyCode::BackTab => {
-                self.focus_previous_left_pane();
-                TuiAction::None
-            }
+            KeyCode::Char('q') => TuiAction::Quit,
+            KeyCode::Esc => self.back_or_quit(),
+            KeyCode::Tab | KeyCode::BackTab => TuiAction::None,
             KeyCode::Left => {
                 self.focus_previous_left_pane();
                 TuiAction::None
@@ -187,7 +188,7 @@ impl TuiApp {
                 self.toggle_theme();
                 TuiAction::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => self.use_selected_profile(),
+            KeyCode::Enter | KeyCode::Char(' ') => self.activate_selection(),
             KeyCode::Char('n') | KeyCode::Char('a') => {
                 self.mode = TuiMode::Editing(ProfileForm::add(self.selected_target()));
                 TuiAction::None
@@ -260,20 +261,8 @@ impl TuiApp {
         let layout = tui_layout(area);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(index) =
-                    list_index_at(layout.targets, mouse.column, mouse.row, Target::all().len())
-                {
-                    self.target_index = index;
-                    self.profile_index = 0;
-                    self.set_focus(FocusPane::Targets);
-                } else if let Some(index) = list_index_at(
-                    layout.profiles,
-                    mouse.column,
-                    mouse.row,
-                    self.selected_profile_indices().len(),
-                ) {
-                    self.profile_index = index;
-                    self.set_focus(FocusPane::Profiles);
+                if rect_contains(layout.navigation, mouse.column, mouse.row) {
+                    self.handle_navigation_click(layout.navigation, mouse.column, mouse.row);
                 } else if rect_contains(layout.details, mouse.column, mouse.row) {
                     self.set_focus(FocusPane::Details);
                 }
@@ -331,18 +320,48 @@ impl TuiApp {
     }
 
     fn focus_from_mouse(&mut self, layout: TuiLayout, column: u16, row: u16) -> bool {
-        if rect_contains(layout.targets, column, row) {
-            self.set_focus(FocusPane::Targets);
-            true
-        } else if rect_contains(layout.profiles, column, row) {
-            self.set_focus(FocusPane::Profiles);
+        if rect_contains(layout.navigation, column, row) {
+            match self.navigation_tab {
+                NavigationTab::Targets => self.set_focus(FocusPane::Targets),
+                NavigationTab::Profiles => self.set_focus(FocusPane::Profiles),
+            }
             true
         } else {
             false
         }
     }
 
+    fn handle_navigation_click(&mut self, area: Rect, column: u16, row: u16) {
+        let list_area = navigation_list_area(area);
+        match self.navigation_tab {
+            NavigationTab::Targets => {
+                if let Some(index) = list_index_in_area(list_area, column, row, Target::all().len())
+                {
+                    self.target_index = index;
+                    self.profile_index = 0;
+                    self.set_focus(FocusPane::Targets);
+                }
+            }
+            NavigationTab::Profiles => {
+                if let Some(index) = list_index_in_area(
+                    list_area,
+                    column,
+                    row,
+                    self.selected_profile_indices().len(),
+                ) {
+                    self.profile_index = index;
+                    self.set_focus(FocusPane::Profiles);
+                }
+            }
+        }
+    }
+
     fn set_focus(&mut self, focus: FocusPane) {
+        match focus {
+            FocusPane::Targets => self.navigation_tab = NavigationTab::Targets,
+            FocusPane::Profiles => self.navigation_tab = NavigationTab::Profiles,
+            FocusPane::Details => {}
+        }
         self.focus = focus;
     }
 
@@ -366,7 +385,7 @@ impl TuiApp {
         match value {
             '1' => {
                 self.set_focus(FocusPane::Targets);
-                self.message = "Focused tools".to_string();
+                self.message = "Focused targets".to_string();
             }
             '2' => {
                 self.set_focus(FocusPane::Profiles);
@@ -430,6 +449,36 @@ impl TuiApp {
     pub(crate) fn selected_profile(&self) -> Option<&Profile> {
         self.selected_profile_index_in_config()
             .and_then(|index| self.config.profiles.get(index))
+    }
+
+    fn activate_selection(&mut self) -> TuiAction {
+        match self.focus {
+            FocusPane::Targets => {
+                self.set_focus(FocusPane::Profiles);
+                self.message = format!("Profiles for {}", self.selected_target());
+                TuiAction::None
+            }
+            FocusPane::Profiles => self.use_selected_profile(),
+            FocusPane::Details => TuiAction::None,
+        }
+    }
+
+    fn back_or_quit(&mut self) -> TuiAction {
+        match self.focus {
+            FocusPane::Profiles => {
+                self.set_focus(FocusPane::Targets);
+                self.message = "Back to targets".to_string();
+                TuiAction::None
+            }
+            FocusPane::Details => {
+                match self.navigation_tab {
+                    NavigationTab::Targets => self.focus = FocusPane::Targets,
+                    NavigationTab::Profiles => self.focus = FocusPane::Profiles,
+                }
+                TuiAction::None
+            }
+            FocusPane::Targets => TuiAction::Quit,
+        }
     }
 
     fn use_selected_profile(&mut self) -> TuiAction {
