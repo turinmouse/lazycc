@@ -122,7 +122,7 @@ mod tests {
         CurrentProfile, config_path_from, default_current_profile, default_current_profiles,
         default_profiles, mask_api_key,
     };
-    use crate::tui::{FocusPane, ProfileForm, TuiAction, TuiApp, TuiMode};
+    use crate::tui::{FocusPane, McpServer, ProfileForm, TuiAction, TuiApp, TuiMode};
 
     fn profile(name: &str, target: Target, api_key: &str) -> Profile {
         Profile {
@@ -355,7 +355,7 @@ mod tests {
         let mut app = TuiApp::new(Config::default());
 
         assert_eq!(app.handle_key(key(KeyCode::Char('2'))), TuiAction::None);
-        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.focus, FocusPane::Mcp);
         assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Details);
         assert_eq!(app.handle_key(key(KeyCode::Char('1'))), TuiAction::None);
@@ -373,9 +373,11 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Profiles);
         assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
+        assert_eq!(app.focus, FocusPane::Mcp);
+        assert_eq!(app.handle_key(key(KeyCode::Right)), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Targets);
         assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
-        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.focus, FocusPane::Mcp);
 
         assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Details);
@@ -384,7 +386,22 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Details);
         assert_eq!(app.handle_key(key(KeyCode::Left)), TuiAction::None);
-        assert_eq!(app.focus, FocusPane::Profiles);
+        assert_eq!(app.focus, FocusPane::Mcp);
+    }
+
+    #[test]
+    fn tui_d_opens_mcp_delete_confirmation_when_mcp_is_focused() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Mcp;
+        app.mcp_servers = vec![McpServer {
+            target: Target::Codex,
+            name: "context-mode".to_string(),
+            details: "context-mode node ./start.mjs".to_string(),
+        }];
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('d'))), TuiAction::None);
+
+        assert!(matches!(app.mode, TuiMode::ConfirmDeleteMcp));
     }
 
     #[test]

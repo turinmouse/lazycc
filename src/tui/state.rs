@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use std::process::Command;
 
 use crate::config::{
     Config, CurrentProfile, DEFAULT_CLAUDE_PROFILE, DEFAULT_CODEX_PROFILE, Profile, Target,
@@ -16,6 +17,7 @@ use super::theme::{TuiTheme, TuiThemeKind};
 pub(crate) enum FocusPane {
     Targets,
     Profiles,
+    Mcp,
     Details,
 }
 
@@ -37,6 +39,14 @@ pub(crate) enum TuiMode {
     Normal,
     Editing(ProfileForm),
     ConfirmDelete,
+    ConfirmDeleteMcp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct McpServer {
+    pub(crate) target: Target,
+    pub(crate) name: String,
+    pub(crate) details: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,6 +126,8 @@ pub(crate) struct TuiApp {
     pub(crate) profile_index: usize,
     pub(crate) focus: FocusPane,
     pub(crate) navigation_tab: NavigationTab,
+    pub(crate) mcp_index: usize,
+    pub(crate) mcp_servers: Vec<McpServer>,
     pub(crate) mode: TuiMode,
     pub(crate) theme_kind: TuiThemeKind,
     pub(crate) message: String,
@@ -130,6 +142,8 @@ impl TuiApp {
             profile_index: 0,
             focus: FocusPane::Targets,
             navigation_tab: NavigationTab::Targets,
+            mcp_index: 0,
+            mcp_servers: Vec::new(),
             mode: TuiMode::Normal,
             theme_kind: TuiThemeKind::Classic,
             message: "Enter opens profiles, Esc backs out, n adds, t theme, q quits".to_string(),
@@ -144,6 +158,7 @@ impl TuiApp {
             TuiMode::Normal => self.handle_normal_key(key),
             TuiMode::Editing(mut form) => self.handle_form_key(key, &mut form),
             TuiMode::ConfirmDelete => self.handle_delete_key(key),
+            TuiMode::ConfirmDeleteMcp => self.handle_delete_mcp_key(key),
         }
     }
 
@@ -152,11 +167,50 @@ impl TuiApp {
             TuiMode::Normal => self.handle_normal_mouse(mouse, area),
             TuiMode::Editing(mut form) => self.handle_form_mouse(mouse, area, &mut form),
             TuiMode::ConfirmDelete => self.handle_delete_mouse(mouse, area),
+            TuiMode::ConfirmDeleteMcp => self.handle_delete_mcp_mouse(mouse, area),
         }
+    }
+
+    pub(crate) fn refresh_mcp_servers(&mut self) {
+        let mut servers = Vec::new();
+        for target in Target::all() {
+            match list_mcp_servers(target) {
+                Ok(mut target_servers) => servers.append(&mut target_servers),
+                Err(error) => {
+                    self.message = error;
+                }
+            }
+        }
+        self.mcp_servers = servers;
+        self.mcp_index = self
+            .mcp_index
+            .min(self.selected_mcp_indices().len().saturating_sub(1));
     }
 
     pub(crate) fn theme(&self) -> TuiTheme {
         self.theme_kind.theme()
+    }
+
+    pub(crate) fn keybindings(&self) -> &'static str {
+        match &self.mode {
+            TuiMode::Normal => match self.focus {
+                FocusPane::Targets => {
+                    "Open profiles: <space>/enter | MCP: 2 | Details: 0 | Theme: t | Quit: q"
+                }
+                FocusPane::Profiles => {
+                    "Use profile: <space>/enter | Add: n | Edit: e | Delete: d | Back: esc | MCP: 2"
+                }
+                FocusPane::Mcp => {
+                    "Delete MCP: d | Tools: 1 | Details: 0 | Back: esc | Theme: t | Quit: q"
+                }
+                FocusPane::Details => "Tools: 1 | MCP: 2 | Back: esc | Theme: t | Quit: q",
+            },
+            TuiMode::Editing(_) => {
+                "Next field: tab/down | Previous: shift-tab/up | Save: enter/ctrl-s | Cancel: esc"
+            }
+            TuiMode::ConfirmDelete => "Confirm: enter/y | Cancel: esc/n",
+            TuiMode::ConfirmDeleteMcp => "Confirm: enter/y | Cancel: esc/n",
+        }
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> TuiAction {
@@ -198,7 +252,11 @@ impl TuiApp {
                 TuiAction::None
             }
             KeyCode::Char('d') => {
-                self.open_delete_confirmation();
+                if self.focus == FocusPane::Mcp {
+                    self.open_delete_mcp_confirmation();
+                } else {
+                    self.open_delete_confirmation();
+                }
                 TuiAction::None
             }
             _ => TuiAction::None,
@@ -257,12 +315,28 @@ impl TuiApp {
         }
     }
 
+    fn handle_delete_mcp_key(&mut self, key: KeyEvent) -> TuiAction {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                self.delete_selected_mcp();
+                TuiAction::None
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.mode = TuiMode::Normal;
+                TuiAction::None
+            }
+            _ => TuiAction::None,
+        }
+    }
+
     fn handle_normal_mouse(&mut self, mouse: MouseEvent, area: Rect) -> TuiAction {
         let layout = tui_layout(area);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if rect_contains(layout.navigation, mouse.column, mouse.row) {
                     self.handle_navigation_click(layout.navigation, mouse.column, mouse.row);
+                } else if rect_contains(layout.mcp, mouse.column, mouse.row) {
+                    self.handle_mcp_click(layout.mcp, mouse.column, mouse.row);
                 } else if rect_contains(layout.details, mouse.column, mouse.row) {
                     self.set_focus(FocusPane::Details);
                 }
@@ -319,6 +393,20 @@ impl TuiApp {
         }
     }
 
+    fn handle_delete_mcp_mouse(&mut self, mouse: MouseEvent, area: Rect) -> TuiAction {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return TuiAction::None;
+        }
+
+        let dialog = centered_rect(52, 7, area);
+        if rect_contains(dialog, mouse.column, mouse.row) {
+            self.delete_selected_mcp();
+        } else {
+            self.mode = TuiMode::Normal;
+        }
+        TuiAction::None
+    }
+
     fn focus_from_mouse(&mut self, layout: TuiLayout, column: u16, row: u16) -> bool {
         if rect_contains(layout.navigation, column, row) {
             match self.navigation_tab {
@@ -326,8 +414,21 @@ impl TuiApp {
                 NavigationTab::Profiles => self.set_focus(FocusPane::Profiles),
             }
             true
+        } else if rect_contains(layout.mcp, column, row) {
+            self.set_focus(FocusPane::Mcp);
+            true
         } else {
             false
+        }
+    }
+
+    fn handle_mcp_click(&mut self, area: Rect, column: u16, row: u16) {
+        let list_area = navigation_list_area(area);
+        if let Some(index) =
+            list_index_in_area(list_area, column, row, self.selected_mcp_indices().len())
+        {
+            self.mcp_index = index;
+            self.set_focus(FocusPane::Mcp);
         }
     }
 
@@ -360,6 +461,7 @@ impl TuiApp {
         match focus {
             FocusPane::Targets => self.navigation_tab = NavigationTab::Targets,
             FocusPane::Profiles => self.navigation_tab = NavigationTab::Profiles,
+            FocusPane::Mcp => {}
             FocusPane::Details => {}
         }
         self.focus = focus;
@@ -368,16 +470,18 @@ impl TuiApp {
     fn focus_next_left_pane(&mut self) {
         match self.focus {
             FocusPane::Targets => self.set_focus(FocusPane::Profiles),
-            FocusPane::Profiles => self.set_focus(FocusPane::Targets),
+            FocusPane::Profiles => self.set_focus(FocusPane::Mcp),
+            FocusPane::Mcp => self.set_focus(FocusPane::Targets),
             FocusPane::Details => self.set_focus(FocusPane::Targets),
         };
     }
 
     fn focus_previous_left_pane(&mut self) {
         match self.focus {
-            FocusPane::Targets => self.set_focus(FocusPane::Profiles),
+            FocusPane::Targets => self.set_focus(FocusPane::Mcp),
             FocusPane::Profiles => self.set_focus(FocusPane::Targets),
-            FocusPane::Details => self.set_focus(FocusPane::Profiles),
+            FocusPane::Mcp => self.set_focus(FocusPane::Profiles),
+            FocusPane::Details => self.set_focus(FocusPane::Mcp),
         };
     }
 
@@ -388,8 +492,8 @@ impl TuiApp {
                 self.message = "Focused targets".to_string();
             }
             '2' => {
-                self.set_focus(FocusPane::Profiles);
-                self.message = "Focused profiles".to_string();
+                self.set_focus(FocusPane::Mcp);
+                self.message = "Focused MCP servers".to_string();
             }
             '0' => {
                 self.focus = FocusPane::Details;
@@ -414,6 +518,10 @@ impl TuiApp {
                     self.selected_profile_indices().len(),
                     delta,
                 );
+            }
+            FocusPane::Mcp => {
+                self.mcp_index =
+                    move_index(self.mcp_index, self.selected_mcp_indices().len(), delta);
             }
             FocusPane::Details => {}
         }
@@ -451,6 +559,21 @@ impl TuiApp {
             .and_then(|index| self.config.profiles.get(index))
     }
 
+    pub(crate) fn selected_mcp_indices(&self) -> Vec<usize> {
+        let target = self.selected_target();
+        self.mcp_servers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, server)| (server.target == target).then_some(index))
+            .collect()
+    }
+
+    pub(crate) fn selected_mcp(&self) -> Option<&McpServer> {
+        self.selected_mcp_indices()
+            .get(self.mcp_index)
+            .and_then(|index| self.mcp_servers.get(*index))
+    }
+
     fn activate_selection(&mut self) -> TuiAction {
         match self.focus {
             FocusPane::Targets => {
@@ -459,6 +582,7 @@ impl TuiApp {
                 TuiAction::None
             }
             FocusPane::Profiles => self.use_selected_profile(),
+            FocusPane::Mcp => TuiAction::None,
             FocusPane::Details => TuiAction::None,
         }
     }
@@ -466,6 +590,11 @@ impl TuiApp {
     fn back_or_quit(&mut self) -> TuiAction {
         match self.focus {
             FocusPane::Profiles => {
+                self.set_focus(FocusPane::Targets);
+                self.message = "Back to targets".to_string();
+                TuiAction::None
+            }
+            FocusPane::Mcp => {
                 self.set_focus(FocusPane::Targets);
                 self.message = "Back to targets".to_string();
                 TuiAction::None
@@ -519,6 +648,14 @@ impl TuiApp {
             return;
         }
         self.mode = TuiMode::ConfirmDelete;
+    }
+
+    fn open_delete_mcp_confirmation(&mut self) {
+        if self.selected_mcp().is_none() {
+            self.message = "No MCP server selected".to_string();
+            return;
+        }
+        self.mode = TuiMode::ConfirmDeleteMcp;
     }
 
     pub(crate) fn save_form(&mut self, form: &mut ProfileForm) -> TuiAction {
@@ -615,6 +752,25 @@ impl TuiApp {
         }
     }
 
+    fn delete_selected_mcp(&mut self) {
+        let Some(server) = self.selected_mcp().cloned() else {
+            self.mode = TuiMode::Normal;
+            return;
+        };
+
+        match remove_mcp_server(server.target, &server.name) {
+            Ok(()) => {
+                self.mode = TuiMode::Normal;
+                self.message = format!("Deleted MCP {} for {}", server.name, server.target);
+                self.refresh_mcp_servers();
+            }
+            Err(error) => {
+                self.mode = TuiMode::Normal;
+                self.message = error;
+            }
+        }
+    }
+
     fn select_current_target(&mut self) {
         for (index, target) in Target::all().iter().enumerate() {
             let default = default_current_profile(*target);
@@ -628,6 +784,90 @@ impl TuiApp {
             }
         }
         self.target_index = 0;
+    }
+}
+
+fn list_mcp_servers(target: Target) -> Result<Vec<McpServer>, String> {
+    let output = Command::new(target.mcp_command())
+        .args(["mcp", "list"])
+        .output()
+        .map_err(|error| format!("Failed to run {} mcp list: {error}", target.mcp_command()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "{} mcp list failed: {}{}",
+            target.mcp_command(),
+            stdout,
+            stderr
+        ));
+    }
+
+    Ok(parse_mcp_list(target, &stdout))
+}
+
+fn remove_mcp_server(target: Target, name: &str) -> Result<(), String> {
+    let output = Command::new(target.mcp_command())
+        .args(["mcp", "remove", name])
+        .output()
+        .map_err(|error| {
+            format!(
+                "Failed to run {} mcp remove {name}: {error}",
+                target.mcp_command()
+            )
+        })?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "{} mcp remove {name} failed: {}{}",
+            target.mcp_command(),
+            stdout,
+            stderr
+        ))
+    }
+}
+
+fn parse_mcp_list(target: Target, output: &str) -> Vec<McpServer> {
+    output
+        .lines()
+        .filter_map(|line| parse_mcp_line(target, line))
+        .collect()
+}
+
+fn parse_mcp_line(target: Target, line: &str) -> Option<McpServer> {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("WARNING:")
+        || trimmed.starts_with("Checking ")
+        || trimmed.starts_with("Name ")
+    {
+        return None;
+    }
+
+    let name = if target == Target::Claude {
+        trimmed.split_once(": ")?.0.trim()
+    } else {
+        trimmed.split_whitespace().next()?
+    };
+
+    Some(McpServer {
+        target,
+        name: name.to_string(),
+        details: trimmed.to_string(),
+    })
+}
+
+impl Target {
+    fn mcp_command(self) -> &'static str {
+        match self {
+            Target::Codex => "codex",
+            Target::Claude => "claude",
+        }
     }
 }
 

@@ -7,6 +7,7 @@ Switch coding-agent provider profiles without re-opening your shell.
 ## Highlights
 
 - Manage Codex and Claude Code provider profiles from one place.
+- View and remove MCP servers from the TUI.
 - Use a terminal UI for daily profile switching.
 - Keep one current profile per target.
 - Mask API keys in list/detail views.
@@ -54,6 +55,7 @@ Add a profile, select it, and your current shell will be refreshed automatically
 The TUI has two main areas:
 
 - Left: `[1] Tools - Targets - Profiles`
+- Left: `[2] MCP`
 - Right: `[0] Configuration`
 
 Navigation is hierarchical. Select a target first, enter its profiles, then choose the active profile.
@@ -64,19 +66,21 @@ Navigation is hierarchical. Select a target first, enter its profiles, then choo
 | `Enter` / `Space` on a target | Open profiles for that target |
 | `Enter` / `Space` on a profile | Use the selected profile |
 | `Esc` in profiles | Return to targets |
-| `1` | Focus the tools area |
-| `2` | Focus profiles |
-| `0` | Focus profile details |
-| `Left` / `Right` | Move between targets and profiles |
+| `1` | Focus the tools/profile area |
+| `2` | Focus MCP servers for the selected target |
+| `0` | Focus details |
+| `Left` / `Right` | Move between targets, profiles, and MCP servers |
 | `n` / `a` | Add a profile for the selected target |
 | `e` | Edit the selected custom profile |
-| `d` | Delete the selected custom profile |
+| `d` | Delete the selected custom profile or MCP server |
 | `t` | Toggle theme |
 | `q` | Quit |
 
 In add/edit forms, `Tab` or arrow keys move between fields, `Enter` saves, and `Esc` cancels.
 
 Built-in `openai` and `anthropic` profiles are read-only and cannot be deleted.
+
+MCP servers are listed with `codex mcp list` or `claude mcp list`, depending on the selected target. Deleting an MCP server calls the matching `mcp remove <name>` command.
 
 ## CLI
 

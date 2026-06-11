@@ -7,6 +7,7 @@ pub(crate) const FORM_FIELD_COUNT: usize = 4;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TuiLayout {
     pub(crate) navigation: Rect,
+    pub(crate) mcp: Rect,
     pub(crate) details: Rect,
     pub(crate) status: Rect,
 }
@@ -20,8 +21,13 @@ pub(crate) fn tui_layout(area: Rect) -> TuiLayout {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
         .split(root[0]);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(columns[0]);
     TuiLayout {
-        navigation: columns[0],
+        navigation: left[0],
+        mcp: left[1],
         details: columns[1],
         status: root[1],
     }

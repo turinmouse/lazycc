@@ -20,6 +20,7 @@ use super::view::draw_tui;
 pub(crate) fn run_tui(path: &Path) -> Result<(), LazyccError> {
     let config = Config::load(path)?;
     let mut app = TuiApp::new(config);
+    app.refresh_mcp_servers();
     let mut stdout = io::stdout();
 
     enable_raw_mode()?;

@@ -19,6 +19,7 @@ pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
     let layout = tui_layout(frame.area());
 
     draw_navigation(frame, app, layout.navigation, theme);
+    draw_mcp_servers(frame, app, layout.mcp, theme);
     draw_profile_details(frame, app, layout.details, theme);
     draw_status(frame, app, layout.status, theme);
 
@@ -26,6 +27,7 @@ pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
         TuiMode::Normal => {}
         TuiMode::Editing(form) => draw_form(frame, form, theme),
         TuiMode::ConfirmDelete => draw_delete_confirmation(frame, app, theme),
+        TuiMode::ConfirmDeleteMcp => draw_delete_mcp_confirmation(frame, app, theme),
     }
 }
 
@@ -90,49 +92,96 @@ fn draw_profiles(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiThem
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn draw_mcp_servers(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
+    let block = pane_block(
+        Line::styled("[2] MCP", Style::default().add_modifier(Modifier::BOLD)),
+        app.focus == FocusPane::Mcp,
+        theme,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items: Vec<ListItem> = app
+        .selected_mcp_indices()
+        .into_iter()
+        .map(|index| {
+            let server = &app.mcp_servers[index];
+            ListItem::new(format!("  {}", server.name))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !items.is_empty() {
+        state.select(Some(app.mcp_index.min(items.len() - 1)));
+    }
+    let list = List::new(items)
+        .highlight_style(selected_style(theme))
+        .highlight_symbol("");
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
 fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
-    let lines = match app.selected_profile() {
-        Some(profile) => {
-            let current = app.config.is_current(&CurrentProfile {
-                target: profile.target,
-                name: profile.name.clone(),
-            });
-            vec![
+    let lines = if app.focus == FocusPane::Mcp {
+        match app.selected_mcp() {
+            Some(server) => vec![
                 Line::from(vec![
                     Span::styled("Name: ", label_style(theme)),
-                    Span::raw(&profile.name),
+                    Span::raw(&server.name),
                 ]),
                 Line::from(vec![
                     Span::styled("Target: ", label_style(theme)),
-                    Span::raw(profile.target.display_name()),
+                    Span::raw(server.target.display_name()),
                 ]),
                 Line::from(vec![
-                    Span::styled("Current: ", label_style(theme)),
-                    Span::raw(if current { "yes" } else { "no" }),
+                    Span::styled("Details: ", label_style(theme)),
+                    Span::raw(&server.details),
                 ]),
-                Line::from(vec![
-                    Span::styled("Model: ", label_style(theme)),
-                    Span::raw(&profile.model),
-                ]),
-                Line::from(vec![
-                    Span::styled("Base URL: ", label_style(theme)),
-                    Span::raw(&profile.base_url),
-                ]),
-                Line::from(vec![
-                    Span::styled("API key: ", label_style(theme)),
-                    Span::raw(mask_api_key(&profile.api_key)),
-                ]),
-                Line::from(vec![
-                    Span::styled("Mode: ", label_style(theme)),
-                    Span::raw(if is_builtin_profile(profile) {
-                        "read-only built-in"
-                    } else {
-                        "custom"
-                    }),
-                ]),
-            ]
+            ],
+            None => vec![Line::from("No MCP server selected")],
         }
-        None => vec![Line::from("No profile selected")],
+    } else {
+        match app.selected_profile() {
+            Some(profile) => {
+                let current = app.config.is_current(&CurrentProfile {
+                    target: profile.target,
+                    name: profile.name.clone(),
+                });
+                vec![
+                    Line::from(vec![
+                        Span::styled("Name: ", label_style(theme)),
+                        Span::raw(&profile.name),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Target: ", label_style(theme)),
+                        Span::raw(profile.target.display_name()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Current: ", label_style(theme)),
+                        Span::raw(if current { "yes" } else { "no" }),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Model: ", label_style(theme)),
+                        Span::raw(&profile.model),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Base URL: ", label_style(theme)),
+                        Span::raw(&profile.base_url),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("API key: ", label_style(theme)),
+                        Span::raw(mask_api_key(&profile.api_key)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Mode: ", label_style(theme)),
+                        Span::raw(if is_builtin_profile(profile) {
+                            "read-only built-in"
+                        } else {
+                            "custom"
+                        }),
+                    ]),
+                ]
+            }
+            None => vec![Line::from("No profile selected")],
+        }
     };
     let paragraph = Paragraph::new(lines)
         .block(pane_block(
@@ -148,7 +197,11 @@ fn draw_profile_details(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: 
 }
 
 fn draw_status(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
-    let status = Paragraph::new(app.message.as_str()).style(Style::default().fg(theme.muted));
+    let status = Paragraph::new(Line::from(vec![
+        Span::styled(app.message.as_str(), Style::default().fg(theme.label)),
+        Span::styled("  |  ", Style::default().fg(theme.muted)),
+        Span::styled(app.keybindings(), Style::default().fg(theme.selected_bg)),
+    ]));
     frame.render_widget(status, area);
 }
 
@@ -221,6 +274,29 @@ fn draw_delete_confirmation(frame: &mut Frame<'_>, app: &TuiApp, theme: TuiTheme
     .block(pane_block(
         Line::styled(
             "Confirm delete",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        true,
+        theme,
+    ));
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_delete_mcp_confirmation(frame: &mut Frame<'_>, app: &TuiApp, theme: TuiTheme) {
+    let area = centered_rect(52, 7, frame.area());
+    frame.render_widget(Clear, area);
+    let name = app
+        .selected_mcp()
+        .map(|server| server.name.as_str())
+        .unwrap_or("");
+    let paragraph = Paragraph::new(vec![
+        Line::from(format!("Delete MCP server '{name}'?")),
+        Line::from("Enter/y confirms, Esc/n cancels"),
+    ])
+    .alignment(Alignment::Center)
+    .block(pane_block(
+        Line::styled(
+            "Confirm delete MCP",
             Style::default().add_modifier(Modifier::BOLD),
         ),
         true,
