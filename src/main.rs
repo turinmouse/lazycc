@@ -4,7 +4,7 @@ mod template;
 mod tools;
 mod tui;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use inquire::{Password, PasswordDisplayMode, Text};
 
 use config::{Config, Profile, Shell, Target, config_path};
@@ -24,8 +24,7 @@ fn run() -> Result<(), LazyccError> {
 
     match cli.command {
         None => {
-            Cli::command().print_help()?;
-            println!();
+            run_tui(&path)?;
         }
         Some(Command::Tui) => run_tui(&path)?,
         Some(Command::Init { shell }) => {
@@ -246,7 +245,9 @@ mod tests {
         assert!(script.contains("lazycc() {\n"));
         assert!(script.contains("  command lazycc \"$@\"\n"));
         assert!(script.contains("  local lazycc_status=$?\n"));
-        assert!(script.contains("  if [ $lazycc_status -eq 0 ] && [ \"$1\" = \"use\" ]; then\n"));
+        assert!(script.contains(
+            "  if [ $lazycc_status -eq 0 ] && { [ $# -eq 0 ] || [ \"$1\" = \"use\" ]; }; then\n"
+        ));
         assert!(script.contains("    eval \"$(command lazycc init zsh)\"\n"));
         assert!(script.contains("  elif [ $lazycc_status -eq 0 ] && [ \"$1\" = \"tui\" ]; then\n"));
         assert!(!script.contains("lazycc_before_init"));
@@ -259,6 +260,13 @@ mod tests {
         let cli = Cli::try_parse_from(["lazycc", "ls"]).expect("ls alias should parse");
 
         assert!(matches!(cli.command, Some(Command::List)));
+    }
+
+    #[test]
+    fn cli_without_subcommand_uses_default_command() {
+        let cli = Cli::try_parse_from(["lazycc"]).expect("empty command should parse");
+
+        assert!(cli.command.is_none());
     }
 
     #[test]

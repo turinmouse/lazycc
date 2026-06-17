@@ -20,7 +20,7 @@ lazycc() {
   command lazycc "$@"
   local lazycc_status=$?
 
-  if [ $lazycc_status -eq 0 ] && [ "$1" = "use" ]; then
+  if [ $lazycc_status -eq 0 ] && { [ $# -eq 0 ] || [ "$1" = "use" ]; }; then
     eval "$(command lazycc init zsh)"
   elif [ $lazycc_status -eq 0 ] && [ "$1" = "tui" ]; then
     eval "$(command lazycc init zsh)"
