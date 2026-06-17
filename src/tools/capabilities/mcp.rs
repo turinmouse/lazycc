@@ -1,7 +1,8 @@
 use crate::config::Target;
 use crate::tools::{CommandRunner, ToolError};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct McpServer {
     pub(crate) target: Target,
     pub(crate) name: String,

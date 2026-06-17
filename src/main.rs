@@ -125,7 +125,10 @@ mod tests {
         default_profiles, mask_api_key,
     };
     use crate::tools::Plugin;
-    use crate::tui::{FocusPane, McpServer, ProfileForm, TuiAction, TuiApp, TuiMode};
+    use crate::tui::{
+        FocusPane, McpServer, ProfileForm, TuiAction, TuiApp, TuiMode, TuiOperation,
+        TuiOperationResult,
+    };
 
     fn profile(name: &str, target: Target, api_key: &str) -> Profile {
         Profile {
@@ -285,6 +288,96 @@ mod tests {
         );
         assert!(app.mcp_refresh_requests.is_empty());
         assert!(app.mcp_servers.is_empty());
+        assert!(app.installed_plugin_refresh_requests.is_empty());
+        assert!(app.plugin_refresh_requests.is_empty());
+        assert!(app.plugins.is_empty());
+    }
+
+    #[test]
+    fn tui_cache_populates_first_paint_data_without_refresh_requests() {
+        let mut app = TuiApp::new(Config::default());
+
+        app.apply_cache(tui::TuiCache {
+            mcp_servers: vec![McpServer {
+                target: Target::Codex,
+                name: "context-mode".to_string(),
+                details: "context-mode node ./start.mjs".to_string(),
+            }],
+            installed_plugins: vec![Plugin {
+                target: Target::Codex,
+                name: "installed-plugin".to_string(),
+                selector: "installed-plugin@test".to_string(),
+                marketplace: None,
+                installed: true,
+                enabled: true,
+                details: "installed".to_string(),
+            }],
+        });
+
+        assert!(app.take_mcp_refresh_requests().is_empty());
+        assert!(app.take_installed_plugin_refresh_requests().is_empty());
+        assert!(app.take_plugin_refresh_requests().is_empty());
+        assert_eq!(
+            app.mcp_refresh_state_for(Target::Codex),
+            tui::McpRefreshState::Loaded
+        );
+        assert_eq!(
+            app.selected_installed_plugin_refresh_state(),
+            tui::McpRefreshState::Loaded
+        );
+        assert_eq!(app.mcp_servers.len(), 1);
+        assert_eq!(app.plugins.len(), 1);
+        assert!(app.available_plugins.is_empty());
+        assert!(!app.plugin_search_loading());
+    }
+
+    #[test]
+    fn tui_installed_plugin_refresh_is_queued_per_target() {
+        let mut app = TuiApp::new(Config::default());
+
+        assert!(app.request_installed_plugin_refresh_for(Target::Codex));
+
+        assert_eq!(
+            app.take_installed_plugin_refresh_requests(),
+            vec![Target::Codex]
+        );
+        assert!(app.take_installed_plugin_refresh_requests().is_empty());
+        assert_eq!(
+            app.selected_installed_plugin_refresh_state(),
+            tui::McpRefreshState::Loading
+        );
+    }
+
+    #[test]
+    fn tui_installed_plugin_refresh_replaces_only_matching_target() {
+        let mut app = TuiApp::new(Config::default());
+        app.plugins = vec![Plugin {
+            target: Target::Claude,
+            name: "claude-old".to_string(),
+            selector: "claude-old".to_string(),
+            marketplace: None,
+            installed: true,
+            enabled: true,
+            details: "installed".to_string(),
+        }];
+
+        app.finish_installed_plugin_refresh(
+            Target::Codex,
+            vec![Plugin {
+                target: Target::Codex,
+                name: "xcode".to_string(),
+                selector: "xcode".to_string(),
+                marketplace: None,
+                installed: true,
+                enabled: true,
+                details: "installed".to_string(),
+            }],
+            None,
+        );
+
+        assert_eq!(app.plugins.len(), 2);
+        assert!(app.plugins.iter().any(|plugin| plugin.name == "xcode"));
+        assert!(app.plugins.iter().any(|plugin| plugin.name == "claude-old"));
     }
 
     #[test]
@@ -681,6 +774,101 @@ mod tests {
     }
 
     #[test]
+    fn tui_plugin_toggle_queues_async_operation_without_mutating_plugin() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Plugins;
+        app.plugins = vec![Plugin {
+            target: Target::Codex,
+            name: "context-mode".to_string(),
+            selector: "context-mode@test".to_string(),
+            marketplace: None,
+            installed: true,
+            enabled: false,
+            details: "installed".to_string(),
+        }];
+
+        let action = app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(
+            action,
+            TuiAction::Run(TuiOperation::TogglePlugin {
+                plugin,
+                enabled: true
+            }) if plugin.name == "context-mode"
+        ));
+        assert!(!app.plugins[0].enabled);
+        assert_eq!(app.pending_operations.len(), 1);
+        assert_eq!(app.message, "Enabling plugin context-mode for codex...");
+    }
+
+    #[test]
+    fn tui_duplicate_plugin_operation_is_ignored_while_pending() {
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Plugins;
+        app.plugins = vec![Plugin {
+            target: Target::Codex,
+            name: "context-mode".to_string(),
+            selector: "context-mode@test".to_string(),
+            marketplace: None,
+            installed: true,
+            enabled: false,
+            details: "installed".to_string(),
+        }];
+
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            TuiAction::Run(_)
+        ));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), TuiAction::None);
+
+        assert_eq!(app.pending_operations.len(), 1);
+        assert_eq!(app.message, "Operation already running");
+    }
+
+    #[test]
+    fn tui_successful_plugin_operation_requests_installed_plugin_refresh() {
+        let mut app = TuiApp::new(Config::default());
+        app.installed_plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
+        let selected = plugin(Target::Codex, "context-mode");
+        let operation = TuiOperation::TogglePlugin {
+            plugin: selected,
+            enabled: true,
+        };
+        app.pending_operations.insert(operation.key());
+
+        app.finish_operation(TuiOperationResult {
+            operation,
+            error: None,
+        });
+
+        assert!(app.pending_operations.is_empty());
+        assert_eq!(
+            app.take_installed_plugin_refresh_requests(),
+            vec![Target::Codex]
+        );
+        assert_eq!(app.message, "Enabled plugin context-mode for codex");
+    }
+
+    #[test]
+    fn tui_failed_operation_clears_pending_without_refreshing() {
+        let mut app = TuiApp::new(Config::default());
+        app.installed_plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
+        let selected = plugin(Target::Codex, "context-mode");
+        let operation = TuiOperation::InstallPlugin(selected);
+        app.pending_operations.insert(operation.key());
+
+        app.finish_operation(TuiOperationResult {
+            operation,
+            error: Some("codex plugin add timed out".to_string()),
+        });
+
+        assert!(app.pending_operations.is_empty());
+        assert!(app.take_installed_plugin_refresh_requests().is_empty());
+        assert!(app.take_plugin_refresh_requests().is_empty());
+        assert_eq!(app.message, "codex plugin add timed out");
+    }
+
+    #[test]
     fn tui_plugin_search_filters_to_selected_target() {
         let mut app = TuiApp::new(Config::default());
         app.available_plugins = vec![
@@ -768,16 +956,42 @@ mod tests {
     }
 
     #[test]
-    fn tui_plugin_refresh_is_queued_per_target_and_not_by_entering_search() {
+    fn tui_plugin_refresh_is_lazy_loaded_when_entering_search() {
         let mut app = TuiApp::new(Config::default());
 
-        assert!(app.request_plugin_refresh());
-        assert_eq!(app.take_plugin_refresh_requests(), Target::all());
+        assert!(app.request_plugin_refresh_for(Target::Codex));
+        assert_eq!(app.take_plugin_refresh_requests(), vec![Target::Codex]);
         assert!(app.take_plugin_refresh_requests().is_empty());
 
         assert_eq!(app.handle_key(key(KeyCode::Char('0'))), TuiAction::None);
         assert_eq!(app.focus, FocusPane::Details);
         assert!(app.take_plugin_refresh_requests().is_empty());
+
+        let mut app = TuiApp::new(Config::default());
+        app.focus = FocusPane::Plugins;
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
+
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+        assert_eq!(app.take_plugin_refresh_requests(), vec![Target::Codex]);
+    }
+
+    #[test]
+    fn tui_plugin_search_refreshes_every_time() {
+        let mut app = TuiApp::new(Config::default());
+        app.available_plugins = vec![plugin(Target::Codex, "market-plugin")];
+        app.plugin_refresh_states = [tui::McpRefreshState::Loaded; 2];
+        app.focus = FocusPane::Plugins;
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), TuiAction::None);
+
+        assert_eq!(app.focus, FocusPane::PluginSearch);
+        assert_eq!(app.take_plugin_refresh_requests(), vec![Target::Codex]);
+        assert_eq!(
+            app.selected_available_plugin()
+                .map(|plugin| plugin.name.as_str()),
+            Some("market-plugin")
+        );
     }
 
     #[test]

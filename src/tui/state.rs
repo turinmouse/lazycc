@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
@@ -7,6 +9,7 @@ use crate::config::{
 };
 use crate::tools::{McpServer, Plugin, tool_for};
 
+use super::cache::TuiCache;
 use super::layout::{
     FORM_FIELD_COUNT, TuiLayout, centered_rect, form_layout, list_index_in_area,
     navigation_list_area, rect_contains, tui_layout,
@@ -36,11 +39,75 @@ pub(crate) enum NavigationTab {
     Profiles,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TuiAction {
     None,
+    Run(TuiOperation),
     Save,
     Quit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TuiOperation {
+    RemoveMcp(McpServer),
+    TogglePlugin { plugin: Plugin, enabled: bool },
+    RemovePlugin(Plugin),
+    InstallPlugin(Plugin),
+    UninstallPlugin(Plugin),
+}
+
+impl TuiOperation {
+    pub(crate) fn key(&self) -> String {
+        match self {
+            TuiOperation::RemoveMcp(server) => {
+                format!("mcp:{}:remove:{}", server.target, server.name)
+            }
+            TuiOperation::TogglePlugin { plugin, .. } => {
+                format!("plugin:{}:toggle:{}", plugin.target, plugin.name)
+            }
+            TuiOperation::RemovePlugin(plugin) => {
+                format!("plugin:{}:remove:{}", plugin.target, plugin.name)
+            }
+            TuiOperation::InstallPlugin(plugin) => {
+                format!("plugin:{}:install:{}", plugin.target, plugin.selector)
+            }
+            TuiOperation::UninstallPlugin(plugin) => {
+                format!("plugin:{}:uninstall:{}", plugin.target, plugin.selector)
+            }
+        }
+    }
+
+    fn loading_message(&self) -> String {
+        match self {
+            TuiOperation::RemoveMcp(server) => {
+                format!("Deleting MCP {} for {}...", server.name, server.target)
+            }
+            TuiOperation::TogglePlugin { plugin, enabled } => format!(
+                "{} plugin {} for {}...",
+                if *enabled { "Enabling" } else { "Disabling" },
+                plugin.name,
+                plugin.target
+            ),
+            TuiOperation::RemovePlugin(plugin) => {
+                format!("Deleting plugin {} for {}...", plugin.name, plugin.target)
+            }
+            TuiOperation::InstallPlugin(plugin) => {
+                format!("Installing plugin {} for {}...", plugin.name, plugin.target)
+            }
+            TuiOperation::UninstallPlugin(plugin) => {
+                format!(
+                    "Uninstalling plugin {} for {}...",
+                    plugin.name, plugin.target
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TuiOperationResult {
+    pub(crate) operation: TuiOperation,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -148,6 +215,8 @@ pub(crate) struct TuiApp {
     pub(crate) mcp_refresh_requests: Vec<Target>,
     pub(crate) plugin_index: usize,
     pub(crate) plugins: Vec<Plugin>,
+    pub(crate) installed_plugin_refresh_states: [McpRefreshState; 2],
+    pub(crate) installed_plugin_refresh_requests: Vec<Target>,
     pub(crate) plugin_refresh_states: [McpRefreshState; 2],
     pub(crate) plugin_refresh_requests: Vec<Target>,
     pub(crate) plugin_search_index: usize,
@@ -156,6 +225,7 @@ pub(crate) struct TuiApp {
     pub(crate) available_plugins: Vec<Plugin>,
     pub(crate) plugin_search_errors: Vec<String>,
     pub(crate) plugin_search_loaded: bool,
+    pub(crate) pending_operations: HashSet<String>,
     pub(crate) mode: TuiMode,
     pub(crate) theme_kind: TuiThemeKind,
     pub(crate) message: String,
@@ -175,7 +245,9 @@ impl TuiApp {
             mcp_refresh_states: [McpRefreshState::NotLoaded; 2],
             mcp_refresh_requests: Vec::new(),
             plugin_index: 0,
-            plugins: load_plugins(),
+            plugins: Vec::new(),
+            installed_plugin_refresh_states: [McpRefreshState::NotLoaded; 2],
+            installed_plugin_refresh_requests: Vec::new(),
             plugin_refresh_states: [McpRefreshState::NotLoaded; 2],
             plugin_refresh_requests: Vec::new(),
             plugin_search_index: 0,
@@ -184,6 +256,7 @@ impl TuiApp {
             available_plugins: Vec::new(),
             plugin_search_errors: Vec::new(),
             plugin_search_loaded: false,
+            pending_operations: HashSet::new(),
             mode: TuiMode::Normal,
             theme_kind: TuiThemeKind::Classic,
             message: "lazycc".to_string(),
@@ -219,18 +292,30 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn request_mcp_refresh(&mut self) -> bool {
-        let mut requested = false;
+    pub(crate) fn apply_cache(&mut self, cache: TuiCache) {
+        self.mcp_servers = cache.mcp_servers;
+        self.plugins = cache.installed_plugins;
+
         for target in Target::all() {
-            requested = self.request_mcp_refresh_for(target) || requested;
+            if self
+                .mcp_servers
+                .iter()
+                .any(|server| server.target == target)
+            {
+                self.mcp_refresh_states[target_refresh_index(target)] = McpRefreshState::Loaded;
+            }
+            if self.plugins.iter().any(|plugin| plugin.target == target) {
+                self.installed_plugin_refresh_states[target_refresh_index(target)] =
+                    McpRefreshState::Loaded;
+            }
         }
-        requested
+        self.clamp_target_scoped_indices();
     }
 
     pub(crate) fn request_mcp_refresh_for(&mut self, target: Target) -> bool {
         let index = target_refresh_index(target);
         if self.mcp_refresh_requests.contains(&target)
-            || self.mcp_refresh_states[index] == McpRefreshState::Loading
+            || self.mcp_refresh_states[index] != McpRefreshState::NotLoaded
         {
             return false;
         }
@@ -269,18 +354,55 @@ impl TuiApp {
         self.mcp_refresh_states[target_refresh_index(target)]
     }
 
-    pub(crate) fn request_plugin_refresh(&mut self) -> bool {
-        let mut requested = false;
-        for target in Target::all() {
-            requested = self.request_plugin_refresh_for(target) || requested;
+    pub(crate) fn request_installed_plugin_refresh_for(&mut self, target: Target) -> bool {
+        let index = target_refresh_index(target);
+        if self.installed_plugin_refresh_requests.contains(&target)
+            || self.installed_plugin_refresh_states[index] != McpRefreshState::NotLoaded
+        {
+            return false;
         }
-        requested
+        self.installed_plugin_refresh_states[index] = McpRefreshState::Loading;
+        self.installed_plugin_refresh_requests.push(target);
+        true
+    }
+
+    pub(crate) fn take_installed_plugin_refresh_requests(&mut self) -> Vec<Target> {
+        std::mem::take(&mut self.installed_plugin_refresh_requests)
+    }
+
+    pub(crate) fn finish_installed_plugin_refresh(
+        &mut self,
+        target: Target,
+        mut plugins: Vec<Plugin>,
+        error: Option<String>,
+    ) {
+        self.plugins.retain(|plugin| plugin.target != target);
+        self.plugins.append(&mut plugins);
+        self.plugins.sort_by(|left, right| {
+            left.target
+                .to_string()
+                .cmp(&right.target.to_string())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        self.installed_plugin_refresh_states[target_refresh_index(target)] =
+            McpRefreshState::Loaded;
+        self.plugin_index = self
+            .plugin_index
+            .min(self.selected_plugin_indices().len().saturating_sub(1));
+        if target == self.selected_target() || self.focus == FocusPane::Plugins {
+            self.message =
+                error.unwrap_or_else(|| format!("Loaded installed plugins for {target}"));
+        }
+    }
+
+    pub(crate) fn selected_installed_plugin_refresh_state(&self) -> McpRefreshState {
+        self.installed_plugin_refresh_states[target_refresh_index(self.selected_target())]
     }
 
     pub(crate) fn request_plugin_refresh_for(&mut self, target: Target) -> bool {
         let index = target_refresh_index(target);
         if self.plugin_refresh_requests.contains(&target)
-            || self.plugin_refresh_states[index] == McpRefreshState::Loading
+            || self.plugin_refresh_states[index] != McpRefreshState::NotLoaded
         {
             return false;
         }
@@ -331,6 +453,67 @@ impl TuiApp {
     pub(crate) fn plugin_search_loading(&self) -> bool {
         self.plugin_refresh_states[target_refresh_index(self.selected_target())]
             == McpRefreshState::Loading
+    }
+
+    pub(crate) fn finish_operation(&mut self, result: TuiOperationResult) {
+        self.pending_operations.remove(&result.operation.key());
+
+        if let Some(error) = result.error {
+            self.message = error;
+            return;
+        }
+
+        match result.operation {
+            TuiOperation::RemoveMcp(server) => {
+                self.message = format!("Deleted MCP {} for {}", server.name, server.target);
+                self.invalidate_mcp_refresh_for(server.target);
+                self.request_mcp_refresh_for(server.target);
+            }
+            TuiOperation::TogglePlugin { plugin, enabled } => {
+                self.message = format!(
+                    "{} plugin {} for {}",
+                    if enabled { "Enabled" } else { "Disabled" },
+                    plugin.name,
+                    plugin.target
+                );
+                self.invalidate_installed_plugin_refresh_for(plugin.target);
+                self.request_installed_plugin_refresh_for(plugin.target);
+            }
+            TuiOperation::RemovePlugin(plugin) => {
+                self.message = format!("Deleted plugin {} for {}", plugin.name, plugin.target);
+                self.invalidate_installed_plugin_refresh_for(plugin.target);
+                self.invalidate_plugin_refresh_for(plugin.target);
+                self.request_installed_plugin_refresh_for(plugin.target);
+                self.request_plugin_refresh_for(plugin.target);
+            }
+            TuiOperation::InstallPlugin(plugin) => {
+                self.message = format!("Installed plugin {} for {}", plugin.name, plugin.target);
+                self.invalidate_installed_plugin_refresh_for(plugin.target);
+                self.invalidate_plugin_refresh_for(plugin.target);
+                self.request_installed_plugin_refresh_for(plugin.target);
+                self.request_plugin_refresh_for(plugin.target);
+            }
+            TuiOperation::UninstallPlugin(plugin) => {
+                self.message = format!("Uninstalled plugin {} for {}", plugin.name, plugin.target);
+                self.invalidate_installed_plugin_refresh_for(plugin.target);
+                self.invalidate_plugin_refresh_for(plugin.target);
+                self.request_installed_plugin_refresh_for(plugin.target);
+                self.request_plugin_refresh_for(plugin.target);
+            }
+        }
+    }
+
+    fn invalidate_mcp_refresh_for(&mut self, target: Target) {
+        self.mcp_refresh_states[target_refresh_index(target)] = McpRefreshState::NotLoaded;
+    }
+
+    fn invalidate_installed_plugin_refresh_for(&mut self, target: Target) {
+        self.installed_plugin_refresh_states[target_refresh_index(target)] =
+            McpRefreshState::NotLoaded;
+    }
+
+    fn invalidate_plugin_refresh_for(&mut self, target: Target) {
+        self.plugin_refresh_states[target_refresh_index(target)] = McpRefreshState::NotLoaded;
     }
 
     pub(crate) fn theme(&self) -> TuiTheme {
@@ -472,11 +655,11 @@ impl TuiApp {
             }
             KeyCode::Char('e') => {
                 if self.focus == FocusPane::Plugins {
-                    self.toggle_selected_plugin();
+                    self.toggle_selected_plugin()
                 } else {
                     self.open_edit_form();
+                    TuiAction::None
                 }
-                TuiAction::None
             }
             KeyCode::Char('d') => {
                 if self.focus == FocusPane::Mcp {
@@ -563,10 +746,7 @@ impl TuiApp {
 
     fn handle_delete_mcp_key(&mut self, key: KeyEvent) -> TuiAction {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                self.delete_selected_mcp();
-                TuiAction::None
-            }
+            KeyCode::Char('y') | KeyCode::Enter => self.delete_selected_mcp(),
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.mode = TuiMode::Normal;
                 TuiAction::None
@@ -577,10 +757,7 @@ impl TuiApp {
 
     fn handle_delete_plugin_key(&mut self, key: KeyEvent) -> TuiAction {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                self.delete_selected_plugin();
-                TuiAction::None
-            }
+            KeyCode::Char('y') | KeyCode::Enter => self.delete_selected_plugin(),
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.mode = TuiMode::Normal;
                 TuiAction::None
@@ -591,10 +768,7 @@ impl TuiApp {
 
     fn handle_uninstall_plugin_key(&mut self, key: KeyEvent, plugin: Plugin) -> TuiAction {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                self.uninstall_plugin(plugin);
-                TuiAction::None
-            }
+            KeyCode::Char('y') | KeyCode::Enter => self.uninstall_plugin(plugin),
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.mode = TuiMode::Normal;
                 TuiAction::None
@@ -680,7 +854,7 @@ impl TuiApp {
 
         let dialog = centered_rect(52, 7, area);
         if rect_contains(dialog, mouse.column, mouse.row) {
-            self.delete_selected_mcp();
+            return self.delete_selected_mcp();
         } else {
             self.mode = TuiMode::Normal;
         }
@@ -694,7 +868,7 @@ impl TuiApp {
 
         let dialog = centered_rect(52, 7, area);
         if rect_contains(dialog, mouse.column, mouse.row) {
-            self.delete_selected_plugin();
+            return self.delete_selected_plugin();
         } else {
             self.mode = TuiMode::Normal;
         }
@@ -713,7 +887,7 @@ impl TuiApp {
 
         let dialog = centered_rect(52, 7, area);
         if rect_contains(dialog, mouse.column, mouse.row) {
-            self.uninstall_plugin(plugin);
+            return self.uninstall_plugin(plugin);
         } else {
             self.mode = TuiMode::Normal;
         }
@@ -800,9 +974,16 @@ impl TuiApp {
                     self.request_mcp_refresh_for(self.selected_target());
                 }
             }
-            FocusPane::Plugins => {}
+            FocusPane::Plugins => {
+                if self.selected_installed_plugin_refresh_state() == McpRefreshState::NotLoaded {
+                    self.request_installed_plugin_refresh_for(self.selected_target());
+                }
+            }
             FocusPane::Details => {}
-            FocusPane::PluginSearch => {}
+            FocusPane::PluginSearch => {
+                self.invalidate_plugin_refresh_for(self.selected_target());
+                self.request_plugin_refresh_for(self.selected_target());
+            }
         }
         self.focus = focus;
     }
@@ -991,15 +1172,9 @@ impl TuiApp {
             }
             FocusPane::Profiles => self.use_selected_profile(),
             FocusPane::Mcp => TuiAction::None,
-            FocusPane::Plugins => {
-                self.toggle_selected_plugin();
-                TuiAction::None
-            }
+            FocusPane::Plugins => self.toggle_selected_plugin(),
             FocusPane::Details => TuiAction::None,
-            FocusPane::PluginSearch => {
-                self.install_or_confirm_selected_plugin();
-                TuiAction::None
-            }
+            FocusPane::PluginSearch => self.install_or_confirm_selected_plugin(),
         }
     }
 
@@ -1189,124 +1364,59 @@ impl TuiApp {
         }
     }
 
-    fn delete_selected_mcp(&mut self) {
+    fn delete_selected_mcp(&mut self) -> TuiAction {
         let Some(server) = self.selected_mcp().cloned() else {
             self.mode = TuiMode::Normal;
-            return;
+            return TuiAction::None;
         };
-
-        let Some(mcp) = tool_for(server.target).mcp() else {
-            self.mode = TuiMode::Normal;
-            self.message = format!("{} does not support MCP", server.target);
-            return;
-        };
-
-        match mcp.remove_server(&server.name) {
-            Ok(()) => {
-                self.mode = TuiMode::Normal;
-                self.message = format!("Deleted MCP {} for {}", server.name, server.target);
-                self.request_mcp_refresh_for(server.target);
-            }
-            Err(error) => {
-                self.mode = TuiMode::Normal;
-                self.message = error.to_string();
-            }
-        }
+        self.mode = TuiMode::Normal;
+        self.begin_operation(TuiOperation::RemoveMcp(server))
     }
 
-    fn toggle_selected_plugin(&mut self) {
+    fn toggle_selected_plugin(&mut self) -> TuiAction {
         let Some(plugin) = self.selected_plugin().cloned() else {
             self.message = "No plugin selected".to_string();
-            return;
-        };
-        let Some(capability) = tool_for(plugin.target).plugin() else {
-            self.message = format!("{} does not support plugins", plugin.target);
-            return;
+            return TuiAction::None;
         };
         let enabled = !plugin.enabled;
-        match capability.set_plugin_enabled(&plugin.name, enabled) {
-            Ok(()) => {
-                self.refresh_plugins();
-                self.message = format!(
-                    "{} plugin {} for {}",
-                    if enabled { "Enabled" } else { "Disabled" },
-                    plugin.name,
-                    plugin.target
-                );
-            }
-            Err(error) => self.message = error.to_string(),
-        }
+        self.begin_operation(TuiOperation::TogglePlugin { plugin, enabled })
     }
 
-    fn delete_selected_plugin(&mut self) {
+    fn delete_selected_plugin(&mut self) -> TuiAction {
         let Some(plugin) = self.selected_plugin().cloned() else {
             self.mode = TuiMode::Normal;
-            return;
+            return TuiAction::None;
         };
-        let Some(capability) = tool_for(plugin.target).plugin() else {
-            self.mode = TuiMode::Normal;
-            self.message = format!("{} does not support plugins", plugin.target);
-            return;
-        };
-        match capability.remove_plugin(&plugin.name) {
-            Ok(()) => {
-                self.mode = TuiMode::Normal;
-                self.refresh_plugins();
-                self.message = format!("Deleted plugin {} for {}", plugin.name, plugin.target);
-            }
-            Err(error) => {
-                self.mode = TuiMode::Normal;
-                self.message = error.to_string();
-            }
-        }
+        self.mode = TuiMode::Normal;
+        self.begin_operation(TuiOperation::RemovePlugin(plugin))
     }
 
-    fn install_or_confirm_selected_plugin(&mut self) {
+    fn install_or_confirm_selected_plugin(&mut self) -> TuiAction {
         let Some(plugin) = self.selected_available_plugin().cloned() else {
             self.message = "No plugin selected".to_string();
-            return;
+            return TuiAction::None;
         };
         if plugin.installed {
             self.mode = TuiMode::ConfirmUninstallPlugin(plugin);
-            return;
+            return TuiAction::None;
         }
-        let Some(capability) = tool_for(plugin.target).plugin() else {
-            self.message = format!("{} does not support plugins", plugin.target);
-            return;
-        };
-        match capability.install_plugin(&plugin.selector) {
-            Ok(()) => {
-                self.refresh_plugins();
-                self.request_plugin_refresh_for(plugin.target);
-                self.message = format!("Installed plugin {} for {}", plugin.name, plugin.target);
-            }
-            Err(error) => self.message = error.to_string(),
-        }
+        self.begin_operation(TuiOperation::InstallPlugin(plugin))
     }
 
-    fn uninstall_plugin(&mut self, plugin: Plugin) {
-        let Some(capability) = tool_for(plugin.target).plugin() else {
-            self.mode = TuiMode::Normal;
-            self.message = format!("{} does not support plugins", plugin.target);
-            return;
-        };
-        match capability.remove_plugin(&plugin.selector) {
-            Ok(()) => {
-                self.mode = TuiMode::Normal;
-                self.refresh_plugins();
-                self.request_plugin_refresh_for(plugin.target);
-                self.message = format!("Uninstalled plugin {} for {}", plugin.name, plugin.target);
-            }
-            Err(error) => {
-                self.mode = TuiMode::Normal;
-                self.message = error.to_string();
-            }
-        }
+    fn uninstall_plugin(&mut self, plugin: Plugin) -> TuiAction {
+        self.mode = TuiMode::Normal;
+        self.begin_operation(TuiOperation::UninstallPlugin(plugin))
     }
 
-    fn refresh_plugins(&mut self) {
-        self.plugins = load_plugins();
-        self.clamp_target_scoped_indices();
+    fn begin_operation(&mut self, operation: TuiOperation) -> TuiAction {
+        let key = operation.key();
+        if !self.pending_operations.insert(key) {
+            self.message = "Operation already running".to_string();
+            return TuiAction::None;
+        }
+
+        self.message = operation.loading_message();
+        TuiAction::Run(operation)
     }
 
     fn select_current_target(&mut self) {
@@ -1357,17 +1467,12 @@ fn target_refresh_index(target: Target) -> usize {
         .expect("target should be known")
 }
 
-fn load_plugins() -> Vec<Plugin> {
-    let mut plugins = Vec::new();
-    for tool in crate::tools::all_tools() {
-        let Some(capability) = tool.plugin() else {
-            continue;
-        };
-        if let Ok(mut target_plugins) = capability.list_plugins() {
-            plugins.append(&mut target_plugins);
-        }
-    }
-    plugins
+pub(super) fn load_plugins_for(target: Target) -> Vec<Plugin> {
+    let tool = tool_for(target);
+    let Some(capability) = tool.plugin() else {
+        return Vec::new();
+    };
+    capability.list_plugins().unwrap_or_default()
 }
 
 fn plugin_matches_query(plugin: &Plugin, query: &str) -> bool {

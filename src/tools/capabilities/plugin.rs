@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::config::Target;
@@ -9,7 +10,7 @@ use crate::tools::{CommandRunner, ToolError};
 
 const PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Plugin {
     pub(crate) target: Target,
     pub(crate) name: String,

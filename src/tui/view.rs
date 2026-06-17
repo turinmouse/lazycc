@@ -44,7 +44,7 @@ pub(crate) fn draw_tui(frame: &mut Frame<'_>, app: &TuiApp) {
 fn draw_navigation(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme) {
     let block = pane_block(
         navigation_title(app.navigation_tab, theme),
-        !matches!(app.focus, FocusPane::PluginSearch | FocusPane::Details),
+        matches!(app.focus, FocusPane::Targets | FocusPane::Profiles),
         theme,
     );
     let inner = block.inner(area);
@@ -114,7 +114,8 @@ fn draw_mcp_servers(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiT
     let selected_indices = app.selected_mcp_indices();
     let items: Vec<ListItem> = if selected_indices.is_empty() {
         let message = match app.selected_mcp_refresh_state() {
-            McpRefreshState::NotLoaded | McpRefreshState::Loading => "  Loading...",
+            McpRefreshState::NotLoaded => "  Not loaded",
+            McpRefreshState::Loading => "  Loading...",
             McpRefreshState::Loaded => "  No MCP servers",
         };
         vec![ListItem::new(message)]
@@ -148,10 +149,16 @@ fn draw_plugins(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, theme: TuiTheme
 
     let indices = app.selected_plugin_indices();
     let items: Vec<ListItem> = if indices.is_empty() {
-        vec![ListItem::new(format!(
-            "  No plugins for {}",
-            app.selected_target()
-        ))]
+        let message = match app.selected_installed_plugin_refresh_state() {
+            McpRefreshState::NotLoaded => {
+                format!("  Plugins not loaded for {}", app.selected_target())
+            }
+            McpRefreshState::Loading => {
+                format!("  Loading plugins for {}...", app.selected_target())
+            }
+            McpRefreshState::Loaded => format!("  No plugins for {}", app.selected_target()),
+        };
+        vec![ListItem::new(message)]
     } else {
         indices
             .iter()
